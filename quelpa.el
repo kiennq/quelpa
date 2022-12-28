@@ -226,29 +226,37 @@ On error return nil."
      quelpa-packages-dir)))
 
 (defconst quelpa--min-ver '(0 -10) "Smallest possible version.")
-(defun quelpa-version-cmp (name version op)
-  "Return non-nil if version of pkg with NAME and VERSION satisfies OP.
+(defconst quelpa--max-ver `(,most-positive-fixnum 0) "Largest possible version.")
+(defun quelpa-version-cmp (rcp version op)
+  "Return non-nil if version of pkg with RCP and VERSION satisfies OP.
 OP is taking two version list and comparing."
-  (let ((ver (if version (version-to-list version) quelpa--min-ver))
-        (pkg-ver
-         (or (when-let* ((pkg-desc (cdr (assq name package-alist)))
-                         (pkg-ver (package-desc-version (car pkg-desc))))
-               pkg-ver)
-             (alist-get name package--builtin-versions)
-             quelpa--min-ver)))
-    (funcall op ver pkg-ver)))
+  (pcase-let* ((ver (if version (version-to-list version) quelpa--min-ver))
+               (`(,name . ,conf) (pcase rcp
+                                   (`(,_ . ,_) rcp)
+                                   (name `(,name))))
+               (ver-type (plist-get conf :version-type))
+               (pkg-ver
+                (or (when-let* ((pkg-desc (cdr (assq name package-alist)))
+                                (pkg-ver (package-desc-version (car pkg-desc))))
+                      (if (equal ver-type 'elpa)
+                          ;; two/three last segments of elpa version type is melpa one
+                          (last pkg-ver (if (>= (car (last pkg-ver)) 0) 2 3))
+                        pkg-ver))
+                    (alist-get rcp package--builtin-versions)
+                    quelpa--min-ver)))
+    (funcall op pkg-ver ver)))
 
-(defmacro quelpa-version>-p (name version)
-  "Return non-nil if VERSION of pkg with NAME is newer than what is currently installed."
-  `(quelpa-version-cmp ,name ,version (lambda (o1 o2) (not (version-list-<= o1 o2)))))
+(defmacro quelpa-version>-p (rcp version)
+  "Return non-nil if VERSION of pkg with RCP is newer than what is currently installed."
+  `(quelpa-version-cmp ,rcp ,version (lambda (o1 o2) (not (version-list-<= o1 o2)))))
 
-(defmacro quelpa-version<-p (name version)
-  "Return non-nil if VERSION of pkg with NAME is older than what is currently installed."
-  `(quelpa-version-cmp ,name ,version 'version-list-<))
+(defmacro quelpa-version<-p (rcp version)
+  "Return non-nil if VERSION of pkg with RCP is older than what is currently installed."
+  `(quelpa-version-cmp ,rcp ,version 'version-list-<))
 
-(defmacro quelpa-version=-p (name version)
-  "Return non-nil if VERSION of pkg with NAME is same which what is currently installed."
-  `(quelpa-version-cmp ,name ,version 'version-list-=))
+(defmacro quelpa-version=-p (rcp version)
+  "Return non-nil if VERSION of pkg with RCP is same which what is currently installed."
+  `(quelpa-version-cmp ,rcp ,version 'version-list-=))
 
 (defun quelpa--package-installed-p (package &optional min-version)
   "Return non-nil if PACKAGE, of MIN-VERSION or newer, is installed.
@@ -274,11 +282,11 @@ Return nil if the package is already installed and should not be upgraded."
                                name (error-message-string err))))))
         (cond
           ((and quelpa--override-version-check
-                (quelpa-version=-p name version))
-           (setq version (concat version ".1"))
-           version)
+                (quelpa-version=-p rcp version))
+           (package-version-join
+            (nconc (version-to-list version) `(-4))))
           ((or quelpa--override-version-check
-               (quelpa-version>-p name version))
+               (quelpa-version<-p rcp version))
            version))))))
 
 (defun quelpa-build (rcp)
