@@ -77,16 +77,15 @@ Defines ERT test with `quelpa-' prepended to NAME and
 `package-alist' and built-in packages."
   (let ((package-alist (cond ((functionp 'package-desc-vers)
                               ;; old package-alist format
-                              '((quelpa . [(20140406 1613)
-                                           ((package-build
-                                             (0)))
+                              '((quelpa . [(1 0 0 20140406 1613)
+                                           ((package-build (0)))
                                            "Emacs Lisp packages built directly from source"])))
                              ((version< emacs-version "26.1")
                               ;; New package-alist format, but before Emacs 26.
                               '((quelpa
                                  [cl-struct-package-desc
                                   quelpa
-                                  (20140406 1613)
+                                  (1 0 0 20140406 1613)
                                   "Emacs Lisp packages built directly from source"
                                   ((package-build (0))) nil nil "test" nil nil])))
                              ((functionp 'record)
@@ -94,19 +93,21 @@ Defines ERT test with `quelpa-' prepended to NAME and
                               `((quelpa
                                  ,(record 'package-desc
                                           'quelpa
-                                          '(20140406 1613)
+                                          '(1 0 0 20140406 1613)
                                           "Emacs Lisp packages built directly from source"
                                           '((package-build (0))) nil nil "test" nil nil)))))))
-    (should-not (quelpa-version>-p 'quelpa nil))
-    (should-not (quelpa-version>-p 'quelpa "0"))
-    (should-not (quelpa-version>-p 'quelpa "20140406.1613"))
-    (should (quelpa-version>-p 'quelpa "20140406.1614"))
+    (should (quelpa-version>-p 'quelpa nil))
+    (should (quelpa-version>-p 'quelpa "0"))
+    (should-not (quelpa-version>-p 'quelpa "1.0.0.20140406.1613"))
+    (should (quelpa-version>-p 'quelpa "1.0.0.20140406.1612"))
+    (should (quelpa-version=-p '(quelpa :version-type elpa) "20140406.1613"))
+    (should (quelpa-version=-p '(quelpa :version-type elpa) "20140406.1613"))
     ;; For not installed package, it should always older than any package version
-    (should (quelpa-version>-p 'foo "0snapshot0.0.1"))
+    (should-not (quelpa-version>-p 'foo "0snapshot0.0.1"))
     (let ((package--builtin-versions '((foobar . (20140406 1613)))))
-      (should-not (quelpa-version>-p 'foobar "0"))
+      (should (quelpa-version>-p 'foobar "0"))
       (should-not (quelpa-version>-p 'foobar "20140406.1613"))
-      (should (quelpa-version>-p 'foobar "20140406.1614")))))
+      (should (quelpa-version>-p 'foobar "20140406.1612")))))
 
 (quelpa-deftest check-hash ()
   "Make sure that old file hash is correctly compared with the new one
