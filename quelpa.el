@@ -310,7 +310,10 @@ already and should not be upgraded etc)."
                                                           files build-dir)))
                        (aref info 3)
                      '(0 0 0))))
-              (while (< (length base-ver) 3) (setq base-ver (append base-ver '(0))))
+              ;; limit the base version length to 4
+              (if (< (length base-ver) 4)
+                  (nconc base-ver (make-list (- 4 (length base-ver)) 0))
+                (setf (nthcdr 4 base-ver) nil))
               (package-version-join
                (nconc base-ver (version-to-list melpa-ver))))))))
     (prog1
