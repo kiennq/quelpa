@@ -9,21 +9,37 @@ Defines ERT test with `quelpa-' prepended to NAME and
 `ert-deftest', which see."
   (declare (indent 2))
   (let ((name (intern (concat "quelpa-" (symbol-name name))))
+        (name-async (intern (concat "quelpa-" (symbol-name name) "-async")))
         (ert-plist (cl-loop while (keywordp (car body))
                             collect (pop body)
                             collect (pop body))))
-    `(ert-deftest ,name ()
-       ,@ert-plist
-       (should (quelpa-setup-p))
-       (cl-macrolet ((should-install (quelpa-args)
-                                     (let* ((name (pcase quelpa-args
+    `(progn
+       (ert-deftest ,name ()
+         ,@ert-plist
+         (should (quelpa-setup-p))
+         (cl-macrolet ((should-install (quelpa-args)
+                         (let* ((name (pcase quelpa-args
+                                        ((pred atom) quelpa-args)
+                                        (`((,name . ,_) . ,_) name)
+                                        (`(,(and name (pred atom)) . ,_) name))))
+                           `(progn
+                              (quelpa ',quelpa-args)
+                              (should (package-installed-p ',name))))))
+           ,@body))
+
+       (ert-deftest ,name-async ()
+         ,@ert-plist
+         (should (quelpa-setup-p))
+         (cl-macrolet ((should-install (quelpa-args)
+                         (let* ((name (pcase quelpa-args
                                                     ((pred atom) quelpa-args)
                                                     (`((,name . ,_) . ,_) name)
                                                     (`(,(and name (pred atom)) . ,_) name))))
                                        `(progn
                                           (quelpa ',quelpa-args)
                                           (should (package-installed-p ',name))))))
-         ,@body))))
+         (let ((quelpa-async-p t))
+           ,@body))))))
 
 (quelpa-deftest expand-recipe ()
   "Should be expanding correctly as return value and into buffer."
