@@ -284,7 +284,7 @@ Return nil if the package is already installed and should not be upgraded."
           ((and quelpa--override-version-check
                 (quelpa-version=-p rcp version))
            (package-version-join
-            (nconc (version-to-list version) `(-4))))
+            (nconc (version-to-list version) `(-4 0))))
           ((or quelpa--override-version-check
                (quelpa-version<-p rcp version))
            version))))))
