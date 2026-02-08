@@ -179,7 +179,7 @@ quelpa cache."
   :group 'quelpa
   :type 'boolean)
 
-(defcustom quelpa-parallel-upgrade-p t
+(defcustom quelpa-dependency-aware-upgrade-p t
   "If non-nil, upgrade packages in dependency-aware order.
 When upgrading multiple packages, quelpa will analyze dependencies
 and upgrade packages in the correct order based on their requirements."
@@ -188,7 +188,7 @@ and upgrade packages in the correct order based on their requirements."
 
 (defcustom quelpa-upgrade-batch-size 4
   "Number of packages to process in each batch during dependency-aware upgrades.
-Only applies when `quelpa-parallel-upgrade-p' is non-nil.
+Only applies when `quelpa-dependency-aware-upgrade-p' is non-nil.
 This controls how many packages are upgraded before checking for newly
 available packages whose dependencies have been satisfied."
   :group 'quelpa
@@ -1971,12 +1971,12 @@ version."
 
 (defun quelpa--get-package-dependencies (rcp)
   "Get the list of package dependencies for recipe RCP.
-Returns a list of package names that RCP depends on."
+Returns a list of package names that RCP depends on, excluding `emacs'."
   (condition-case nil
       (let* ((name (car (quelpa-arg-rcp rcp)))
              (pkg-desc (cadr (assq name package-alist))))
         (when pkg-desc
-          (mapcar #'car (package-desc-reqs pkg-desc))))
+          (cl-remove 'emacs (mapcar #'car (package-desc-reqs pkg-desc)))))
     (error nil)))
 
 (defun quelpa--build-upgrade-graph (recipes)
@@ -2106,7 +2106,7 @@ This provides an easy way to upgrade all the packages for which
 the `quelpa' command has been run in the current Emacs session.
 With prefix FORCE, packages will all be upgraded discarding local changes.
 
-When `quelpa-parallel-upgrade-p' is non-nil, packages are upgraded
+When `quelpa-dependency-aware-upgrade-p' is non-nil, packages are upgraded
 in dependency order based on their dependency graph, ensuring that
 packages are upgraded after their dependencies."
   (interactive "P")
@@ -2114,7 +2114,7 @@ packages are upgraded after their dependencies."
     (when quelpa-self-upgrade-p
       (quelpa-self-upgrade))
     (let ((action (when force 'force)))
-      (if (and quelpa-parallel-upgrade-p
+      (if (and quelpa-dependency-aware-upgrade-p
                (> (length quelpa-cache) 1))  ; Require multiple packages for dependency-aware upgrade
           ;; Use dependency-aware upgrade
           (quelpa--dependency-aware-upgrade-all quelpa-cache action)

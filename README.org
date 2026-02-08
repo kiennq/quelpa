@@ -140,11 +140,11 @@ To run =quelpa-upgrade-all= at most every 7 days, after all the init files are l
 
 When upgrading multiple packages, Quelpa can analyze package dependencies and upgrade them in the correct order, ensuring dependencies are upgraded before packages that depend on them.
 
-To enable dependency-aware upgrades, set =quelpa-parallel-upgrade-p= to =t=:
+To enable dependency-aware upgrades, set =quelpa-dependency-aware-upgrade-p= to =t=:
 
 #+BEGIN_SRC elisp
-  (setq quelpa-parallel-upgrade-p t)   ; Enable dependency-aware upgrades
-  (setq quelpa-upgrade-batch-size 4)   ; Number of packages to process per batch
+  (setq quelpa-dependency-aware-upgrade-p t)   ; Enable dependency-aware upgrades
+  (setq quelpa-upgrade-batch-size 4)           ; Number of packages to process per batch
 #+END_SRC
 
 When dependency-aware upgrades are enabled:
