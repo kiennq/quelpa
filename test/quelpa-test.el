@@ -255,6 +255,83 @@ update an existing cache item."
                            (:exclude "helm.el" "helm-lib.el" "helm-source.el" "helm-match-plugin.el" "helm-core-pkg.el"))
                    :path "~/emacs-packages/helm")))
 
+;;;; Parallel Upgrade Tests
+
+(ert-deftest quelpa-test-build-upgrade-graph ()
+  "Test building a dependency graph for package upgrades."
+  (let ((recipes '((package-a :repo "test/package-a" :fetcher github)
+                   (package-b :repo "test/package-b" :fetcher github)
+                   (package-c :repo "test/package-c" :fetcher github))))
+    ;; Mock package-alist with dependencies
+    (let ((package-alist
+           `((package-a
+              ,(record 'package-desc 'package-a '(1 0 0) "Package A" nil nil nil "test" nil nil))
+             (package-b
+              ,(record 'package-desc 'package-b '(1 0 0) "Package B" '((package-a (1 0 0))) nil nil "test" nil nil))
+             (package-c
+              ,(record 'package-desc 'package-c '(1 0 0) "Package C" '((package-b (1 0 0))) nil nil "test" nil nil)))))
+      (let ((graph (quelpa--build-upgrade-graph recipes)))
+        ;; package-a has no dependencies (in our upgrade set)
+        (should (equal (cdr (assq 'package-a graph)) nil))
+        ;; package-b depends on package-a
+        (should (equal (cdr (assq 'package-b graph)) '(package-a)))
+        ;; package-c depends on package-b
+        (should (equal (cdr (assq 'package-c graph)) '(package-b)))))))
+
+(ert-deftest quelpa-test-packages-ready-to-upgrade ()
+  "Test identifying packages ready for upgrade."
+  (let ((graph '((package-a)
+                 (package-b package-a)
+                 (package-c package-b)))
+        (completed nil))
+    ;; Initially, only package-a is ready (no deps)
+    (let ((ready (quelpa--packages-ready-to-upgrade graph completed)))
+      (should (equal (length ready) 1))
+      (should (eq (caar ready) 'package-a)))
+    
+    ;; After package-a completes, package-b is ready
+    (setq completed '(package-a))
+    (let ((ready (quelpa--packages-ready-to-upgrade graph completed)))
+      (should (equal (length ready) 1))
+      (should (eq (caar ready) 'package-b)))
+    
+    ;; After package-b completes, package-c is ready
+    (setq completed '(package-a package-b))
+    (let ((ready (quelpa--packages-ready-to-upgrade graph completed)))
+      (should (equal (length ready) 1))
+      (should (eq (caar ready) 'package-c)))
+    
+    ;; After all complete, nothing is ready
+    (setq completed '(package-a package-b package-c))
+    (let ((ready (quelpa--packages-ready-to-upgrade graph completed)))
+      (should (equal (length ready) 0)))))
+
+(ert-deftest quelpa-test-parallel-upgrades-enabled ()
+  "Test that parallel upgrades are enabled when configured."
+  ;; Test that the configuration variables exist
+  (should (boundp 'quelpa-parallel-upgrade-p))
+  (should (boundp 'quelpa-max-parallel-upgrades))
+  (should (boundp 'quelpa-async-p))
+  
+  ;; Test default values
+  (should (eq quelpa-parallel-upgrade-p t))
+  (should (numberp quelpa-max-parallel-upgrades))
+  (should (> quelpa-max-parallel-upgrades 0)))
+
+(ert-deftest quelpa-test-get-package-dependencies ()
+  "Test extracting dependencies from a package."
+  ;; Mock package-alist with a package that has dependencies
+  (let ((package-alist
+         `((test-package
+            ,(record 'package-desc 'test-package '(1 0 0) "Test Package"
+                     '((dep1 (1 0)) (dep2 (2 0)) (emacs (25 1)))
+                     nil nil "test" nil nil)))))
+    (let ((deps (quelpa--get-package-dependencies '(test-package :repo "test/pkg" :fetcher github))))
+      ;; Should return dep1 and dep2, but not emacs
+      (should (memq 'dep1 deps))
+      (should (memq 'dep2 deps))
+      (should-not (memq 'emacs deps)))))
+
 ;;;; Footer
 
 (provide 'quelpa-tests)
