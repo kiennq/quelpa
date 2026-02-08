@@ -190,9 +190,15 @@ and upgrade packages in the correct order based on their requirements."
   "Number of packages to process in each batch during dependency-aware upgrades.
 Only applies when `quelpa-dependency-aware-upgrade-p' is non-nil.
 This controls how many packages are upgraded before checking for newly
-available packages whose dependencies have been satisfied."
+available packages whose dependencies have been satisfied.
+Must be a positive integer."
   :group 'quelpa
-  :type 'integer)
+  :type '(integer :validate
+                  (lambda (widget)
+                    (let ((value (widget-value widget)))
+                      (when (<= value 0)
+                        (widget-put widget :error "Value must be a positive integer")
+                        widget)))))
 
 (defvar quelpa-initialized-p nil
   "Non-nil when quelpa has been initialized.")
@@ -2039,7 +2045,7 @@ in batches. This ensures correct ordering and provides better progress feedback.
                     (push pkg failed)))))
           
           ;; Process ready packages in batches
-          (let* ((batch-size (min (length ready) quelpa-upgrade-batch-size))
+          (let* ((batch-size (max 1 (min (length ready) quelpa-upgrade-batch-size)))
                  (to-process (cl-subseq ready 0 batch-size)))
             
             ;; Process each package in the batch
