@@ -306,7 +306,7 @@ update an existing cache item."
     (let ((ready (quelpa--packages-ready-to-upgrade graph completed)))
       (should (= (length ready) 0))))))
 
-(ert-deftest quelpa-test-parallel-upgrades-enabled ()
+(ert-deftest quelpa-test-dependency-aware-upgrades-enabled ()
   "Test that dependency-aware upgrades are enabled when configured."
   ;; Test that the configuration variables exist
   (should (boundp 'quelpa-dependency-aware-upgrade-p))

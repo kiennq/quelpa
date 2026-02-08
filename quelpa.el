@@ -2019,7 +2019,7 @@ in batches. This ensures correct ordering and provides better progress feedback.
          (start-time (current-time)))
     
     (when quelpa-verbose
-      (message "Upgrading %d packages with dependency-aware scheduling..." total))
+      (message "Upgrading %d packages in dependency order..." total))
     
     ;; Process packages in dependency order
     (while (< (+ (length completed) (length failed)) total)
