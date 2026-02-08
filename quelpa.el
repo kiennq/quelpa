@@ -176,7 +176,21 @@ quelpa cache."
 
 (defcustom quelpa-async-p nil
   "If non-nil, quelpa operation will not block Emacs input."
+  :group 'quelpa
   :type 'boolean)
+
+(defcustom quelpa-parallel-upgrade-p t
+  "If non-nil, upgrade independent packages in parallel.
+When upgrading multiple packages, quelpa will analyze dependencies
+and upgrade packages that don't depend on each other in parallel."
+  :group 'quelpa
+  :type 'boolean)
+
+(defcustom quelpa-max-parallel-upgrades 4
+  "Maximum number of packages to upgrade in parallel.
+Only applies when `quelpa-parallel-upgrade-p' is non-nil."
+  :group 'quelpa
+  :type 'integer)
 
 (defvar quelpa-initialized-p nil
   "Non-nil when quelpa has been initialized.")
@@ -1951,6 +1965,141 @@ version."
     (when-let* ((all-pkgs (alist-get name package-alist)))
       (setf (cdr all-pkgs) nil))))
 
+;; --- parallel async upgrade support ----------------------------------------
+
+(defvar quelpa--upgrade-graph nil
+  "Dependency graph for packages being upgraded.
+This is an alist where each element is (PACKAGE . DEPENDENCIES).")
+
+(defvar quelpa--upgrade-queue nil
+  "Queue of packages waiting to be upgraded.")
+
+(defvar quelpa--upgrade-in-progress nil
+  "List of packages currently being upgraded asynchronously.")
+
+(defvar quelpa--upgrade-completed nil
+  "List of packages that have completed upgrading.")
+
+(defvar quelpa--upgrade-failed nil
+  "List of packages that failed to upgrade.")
+
+(defun quelpa--get-package-dependencies (rcp)
+  "Get the list of package dependencies for recipe RCP.
+Returns a list of package names that RCP depends on."
+  (condition-case nil
+      (let* ((name (car (quelpa-arg-rcp rcp)))
+             (pkg-desc (cadr (assq name package-alist))))
+        (when pkg-desc
+          (mapcar #'car (package-desc-reqs pkg-desc))))
+    (error nil)))
+
+(defun quelpa--build-upgrade-graph (recipes)
+  "Build a dependency graph for RECIPES.
+Returns an alist where each element is (PACKAGE . DEPENDENCIES).
+DEPENDENCIES is a list of package names that PACKAGE depends on."
+  (mapcar (lambda (rcp)
+            (let* ((name (car (quelpa-arg-rcp rcp)))
+                   (deps (quelpa--get-package-dependencies rcp))
+                   ;; Filter deps to only include packages in our upgrade list
+                   (relevant-deps
+                    (cl-remove-if-not
+                     (lambda (dep)
+                       (cl-some (lambda (r)
+                                  (eq dep (car (quelpa-arg-rcp r))))
+                                recipes))
+                     deps)))
+              (cons name relevant-deps)))
+          recipes))
+
+(defun quelpa--packages-ready-to-upgrade (graph completed)
+  "Return packages from GRAPH ready to upgrade.
+A package is ready if all its dependencies are in COMPLETED list."
+  (cl-remove-if-not
+   (lambda (node)
+     (let ((pkg (car node))
+           (deps (cdr node)))
+       (and (not (memq pkg completed))
+            (cl-every (lambda (dep) (memq dep completed)) deps))))
+   graph))
+
+(defun quelpa--upgrade-package-async (rcp action callback)
+  "Upgrade package RCP asynchronously with ACTION.
+Call CALLBACK with (PACKAGE-NAME . SUCCESS) when done."
+  (let* ((name (car (quelpa-arg-rcp rcp)))
+         (quelpa-upgrade-p t)
+         (current-prefix-arg nil)
+         (config (append (cond ((eq action 'force) `(:force t))
+                               ((eq action 'local) `(:use-current-ref t)))
+                         `(:autoremove ,quelpa-autoremove-p))))
+    (run-with-timer
+     0.1 nil
+     (lambda ()
+       (condition-case err
+           (progn
+             (when quelpa-verbose
+               (message "Upgrading package %s..." name))
+             (apply #'quelpa rcp config)
+             (when quelpa-verbose
+               (message "Package %s upgraded successfully" name))
+             (funcall callback (cons name t)))
+         (error
+          (message "Failed to upgrade package %s: %S" name err)
+          (funcall callback (cons name nil))))))))
+
+(defun quelpa--parallel-upgrade-all-1 (recipes action)
+  "Internal function to upgrade RECIPES in parallel with ACTION.
+This function manages the upgrade queue and coordinates parallel upgrades."
+  (let ((graph (quelpa--build-upgrade-graph recipes))
+        (completed nil)
+        (failed nil)
+        (in-progress 0)
+        (total (length recipes))
+        (processed 0))
+    (when quelpa-verbose
+      (message "Upgrading %d packages with dependency-aware parallelism..." total))
+    
+    (while (< processed total)
+      ;; Find packages ready to upgrade
+      (let* ((ready (quelpa--packages-ready-to-upgrade graph completed))
+             ;; Limit to max parallel upgrades
+             (to-start (cl-subseq ready 0 (min (length ready)
+                                                 (- quelpa-max-parallel-upgrades
+                                                    in-progress)))))
+        
+        (if (and (zerop in-progress) (null to-start))
+            ;; Deadlock: no packages in progress and none ready
+            ;; This means we have circular dependencies or all remaining packages failed
+            (progn
+              (when quelpa-verbose
+                (message "Cannot proceed with remaining packages due to dependencies"))
+              (setq processed total))
+          
+          ;; Start upgrading ready packages
+          (dolist (node to-start)
+            (let ((pkg-name (car node))
+                  (rcp (cl-find-if (lambda (r)
+                                     (eq (car (quelpa-arg-rcp r)) pkg-name))
+                                   recipes)))
+              (when rcp
+                (cl-incf in-progress)
+                (quelpa--upgrade-package-async
+                 rcp action
+                 (lambda (result)
+                   (let ((pkg (car result))
+                         (success (cdr result)))
+                     (cl-decf in-progress)
+                     (cl-incf processed)
+                     (if success
+                         (push pkg completed)
+                       (push pkg failed))
+                     (when quelpa-verbose
+                       (message "Progress: %d/%d completed, %d failed, %d in progress"
+                                (length completed) total (length failed) in-progress))))))))
+          
+          ;; Wait a bit for async operations
+          (unless (zerop in-progress)
+            (sleep-for 0.1)))))))
+
 ;; --- public interface ------------------------------------------------------
 
 ;;;###autoload
@@ -1980,14 +2129,25 @@ ARGS are additional options for the quelpa recipe."
   "Upgrade all packages found in `quelpa-cache'.
 This provides an easy way to upgrade all the packages for which
 the `quelpa' command has been run in the current Emacs session.
-With prefix FORCE, packages will all be upgraded discarding local changes."
+With prefix FORCE, packages will all be upgraded discarding local changes.
+
+When `quelpa-parallel-upgrade-p' is non-nil, packages are upgraded
+in parallel based on their dependency graph, with independent packages
+being upgraded simultaneously."
   (interactive "P")
   (when (quelpa-setup-p)
     (when quelpa-self-upgrade-p
       (quelpa-self-upgrade))
-    (mapc (lambda (rcp)
-            (quelpa-upgrade rcp (when force 'force)))
-          quelpa-cache)))
+    (let ((action (when force 'force)))
+      (if (and quelpa-parallel-upgrade-p
+               quelpa-async-p
+               (> (length quelpa-cache) 1))
+          ;; Use parallel async upgrade
+          (quelpa--parallel-upgrade-all-1 quelpa-cache action)
+        ;; Use sequential upgrade
+        (mapc (lambda (rcp)
+                (quelpa-upgrade rcp action))
+              quelpa-cache)))))
 
 ;;;###autoload
 (defun quelpa-upgrade (rcp &optional action)
