@@ -2024,51 +2024,52 @@ in batches. This ensures correct ordering and provides better progress feedback.
     ;; Process packages in dependency order
     (while (< (+ (length completed) (length failed)) total)
       ;; Find packages ready to upgrade
-      (let* ((ready (quelpa--packages-ready-to-upgrade graph completed))
-             ;; Limit batch size
-             (batch-size (min (length ready) quelpa-upgrade-batch-size))
-             (to-process (cl-subseq ready 0 batch-size)))
+      (let* ((ready (quelpa--packages-ready-to-upgrade graph completed)))
         
         ;; Deadlock detection: no packages ready but not all done
-        (when (and (null to-process)
-                   (< (+ (length completed) (length failed)) total))
-          (let ((remaining (- total (length completed) (length failed))))
-            (when quelpa-verbose
-              (message "Warning: Cannot proceed with %d remaining package(s)" remaining)
-              (message "This may indicate circular dependencies or prerequisite failures"))
-            ;; Mark remaining as failed to exit loop
-            (dolist (node graph)
-              (let ((pkg (car node)))
-                (unless (or (memq pkg completed) (memq pkg failed))
-                  (push pkg failed))))))
-        
-        ;; Process ready packages
-        (dolist (node to-process)
-          (let* ((pkg-name (car node))
-                 (rcp (cl-find-if (lambda (r)
-                                    (eq (car (quelpa-arg-rcp r)) pkg-name))
-                                  recipes)))
-            (when rcp
-              (condition-case err
-                  (progn
-                    (when quelpa-verbose
-                      (message "Upgrading package %s..." pkg-name))
-                    (let ((quelpa-upgrade-p t)
-                          (current-prefix-arg nil)
-                          (config (append (cond ((eq action 'force) `(:force t))
-                                                ((eq action 'local) `(:use-current-ref t)))
-                                          `(:autoremove ,quelpa-autoremove-p))))
-                      (apply #'quelpa rcp config))
-                    (push pkg-name completed)
-                    (when quelpa-verbose
-                      (message "Package %s upgraded successfully" pkg-name)))
-                (error
-                 (message "Failed to upgrade package %s: %S" pkg-name err)
-                 (push pkg-name failed)))
-              
+        (if (and (null ready)
+                 (< (+ (length completed) (length failed)) total))
+            (let ((remaining (- total (length completed) (length failed))))
               (when quelpa-verbose
-                (message "Progress: %d/%d completed, %d failed"
-                         (length completed) total (length failed))))))))
+                (message "Warning: Cannot proceed with %d remaining package(s)" remaining)
+                (message "This may indicate circular dependencies or prerequisite failures"))
+              ;; Mark remaining as failed to exit loop
+              (dolist (node graph)
+                (let ((pkg (car node)))
+                  (unless (or (memq pkg completed) (memq pkg failed))
+                    (push pkg failed)))))
+          
+          ;; Process ready packages in batches
+          (let* ((batch-size (min (length ready) quelpa-upgrade-batch-size))
+                 (to-process (cl-subseq ready 0 batch-size)))
+            
+            ;; Process each package in the batch
+            (dolist (node to-process)
+              (let* ((pkg-name (car node))
+                     (rcp (cl-find-if (lambda (r)
+                                        (eq (car (quelpa-arg-rcp r)) pkg-name))
+                                      recipes)))
+                (when rcp
+                  (condition-case err
+                      (progn
+                        (when quelpa-verbose
+                          (message "Upgrading package %s..." pkg-name))
+                        (let ((quelpa-upgrade-p t)
+                              (current-prefix-arg nil)
+                              (config (append (cond ((eq action 'force) `(:force t))
+                                                    ((eq action 'local) `(:use-current-ref t)))
+                                              `(:autoremove ,quelpa-autoremove-p))))
+                          (apply #'quelpa rcp config))
+                        (push pkg-name completed)
+                        (when quelpa-verbose
+                          (message "Package %s upgraded successfully" pkg-name)))
+                    (error
+                     (message "Failed to upgrade package %s: %S" pkg-name err)
+                     (push pkg-name failed)))
+                  
+                  (when quelpa-verbose
+                    (message "Progress: %d/%d completed, %d failed"
+                             (length completed) total (length failed))))))))
     
     (when quelpa-verbose
       (message "Upgrade complete: %d succeeded, %d failed in %.2f seconds"
@@ -2114,8 +2115,7 @@ packages are upgraded after their dependencies."
     (when quelpa-self-upgrade-p
       (quelpa-self-upgrade))
     (let ((action (when force 'force)))
-      (if (and quelpa-dependency-aware-upgrade-p
-               (> (length quelpa-cache) 1))  ; Require multiple packages for dependency-aware upgrade
+      (if quelpa-dependency-aware-upgrade-p
           ;; Use dependency-aware upgrade
           (quelpa--dependency-aware-upgrade-all quelpa-cache action)
         ;; Use sequential upgrade
