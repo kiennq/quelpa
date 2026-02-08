@@ -2107,8 +2107,8 @@ the `quelpa' command has been run in the current Emacs session.
 With prefix FORCE, packages will all be upgraded discarding local changes.
 
 When `quelpa-parallel-upgrade-p' is non-nil, packages are upgraded
-in parallel based on their dependency graph, with independent packages
-being upgraded simultaneously."
+in dependency order based on their dependency graph, ensuring that
+packages are upgraded after their dependencies."
   (interactive "P")
   (when (quelpa-setup-p)
     (when quelpa-self-upgrade-p

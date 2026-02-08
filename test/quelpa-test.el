@@ -255,7 +255,7 @@ update an existing cache item."
                            (:exclude "helm.el" "helm-lib.el" "helm-source.el" "helm-match-plugin.el" "helm-core-pkg.el"))
                    :path "~/emacs-packages/helm")))
 
-;;;; Parallel Upgrade Tests
+;;;; Dependency-Aware Upgrade Tests
 
 (ert-deftest quelpa-test-build-upgrade-graph ()
   "Test building a dependency graph for package upgrades."
