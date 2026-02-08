@@ -2047,58 +2047,72 @@ Call CALLBACK with (PACKAGE-NAME . SUCCESS) when done."
           (funcall callback (cons name nil))))))))
 
 (defun quelpa--parallel-upgrade-all-1 (recipes action)
-  "Internal function to upgrade RECIPES in parallel with ACTION.
-This function manages the upgrade queue and coordinates parallel upgrades."
-  (let ((graph (quelpa--build-upgrade-graph recipes))
-        (completed nil)
-        (failed nil)
-        (in-progress 0)
-        (total (length recipes))
-        (processed 0))
-    (when quelpa-verbose
-      (message "Upgrading %d packages with dependency-aware parallelism..." total))
+  "Internal function to upgrade RECIPES respecting dependencies.
+This function upgrades packages in dependency order, upgrading independent
+packages in batches. While not truly parallel due to Emacs single-threading,
+this ensures correct ordering and provides better progress feedback."
+  (let* ((graph (quelpa--build-upgrade-graph recipes))
+         (completed nil)
+         (failed nil)
+         (total (length recipes))
+         (start-time (current-time)))
     
-    (while (< processed total)
+    (when quelpa-verbose
+      (message "Upgrading %d packages with dependency-aware scheduling..." total))
+    
+    ;; Process packages in dependency order
+    (while (< (+ (length completed) (length failed)) total)
       ;; Find packages ready to upgrade
       (let* ((ready (quelpa--packages-ready-to-upgrade graph completed))
-             ;; Limit to max parallel upgrades
-             (to-start (cl-subseq ready 0 (min (length ready)
-                                                 (- quelpa-max-parallel-upgrades
-                                                    in-progress)))))
+             ;; Limit batch size
+             (batch-size (min (length ready) quelpa-max-parallel-upgrades))
+             (to-process (cl-subseq ready 0 batch-size)))
         
-        (if (and (zerop in-progress) (null to-start))
-            ;; Deadlock: no packages in progress and none ready
-            ;; This means we have circular dependencies or all remaining packages failed
-            (progn
+        ;; Deadlock detection: no packages ready but not all done
+        (when (and (null to-process)
+                   (< (+ (length completed) (length failed)) total))
+          (let ((remaining (- total (length completed) (length failed))))
+            (when quelpa-verbose
+              (message "Warning: Cannot proceed with %d remaining package(s)" remaining)
+              (message "This may indicate circular dependencies or prerequisite failures"))
+            ;; Mark remaining as failed to exit loop
+            (dolist (node graph)
+              (let ((pkg (car node)))
+                (unless (or (memq pkg completed) (memq pkg failed))
+                  (push pkg failed))))))
+        
+        ;; Process ready packages
+        (dolist (node to-process)
+          (let* ((pkg-name (car node))
+                 (rcp (cl-find-if (lambda (r)
+                                    (eq (car (quelpa-arg-rcp r)) pkg-name))
+                                  recipes)))
+            (when rcp
+              (condition-case err
+                  (progn
+                    (when quelpa-verbose
+                      (message "Upgrading package %s..." pkg-name))
+                    (let ((quelpa-upgrade-p t)
+                          (current-prefix-arg nil)
+                          (config (append (cond ((eq action 'force) `(:force t))
+                                                ((eq action 'local) `(:use-current-ref t)))
+                                          `(:autoremove ,quelpa-autoremove-p))))
+                      (apply #'quelpa rcp config))
+                    (push pkg-name completed)
+                    (when quelpa-verbose
+                      (message "Package %s upgraded successfully" pkg-name)))
+                (error
+                 (message "Failed to upgrade package %s: %S" pkg-name err)
+                 (push pkg-name failed)))
+              
               (when quelpa-verbose
-                (message "Cannot proceed with remaining packages due to dependencies"))
-              (setq processed total))
-          
-          ;; Start upgrading ready packages
-          (dolist (node to-start)
-            (let ((pkg-name (car node))
-                  (rcp (cl-find-if (lambda (r)
-                                     (eq (car (quelpa-arg-rcp r)) pkg-name))
-                                   recipes)))
-              (when rcp
-                (cl-incf in-progress)
-                (quelpa--upgrade-package-async
-                 rcp action
-                 (lambda (result)
-                   (let ((pkg (car result))
-                         (success (cdr result)))
-                     (cl-decf in-progress)
-                     (cl-incf processed)
-                     (if success
-                         (push pkg completed)
-                       (push pkg failed))
-                     (when quelpa-verbose
-                       (message "Progress: %d/%d completed, %d failed, %d in progress"
-                                (length completed) total (length failed) in-progress))))))))
-          
-          ;; Wait a bit for async operations
-          (unless (zerop in-progress)
-            (sleep-for 0.1)))))))
+                (message "Progress: %d/%d completed, %d failed"
+                         (length completed) total (length failed))))))))
+    
+    (when quelpa-verbose
+      (message "Upgrade complete: %d succeeded, %d failed in %.2f seconds"
+               (length completed) (length failed)
+               (float-time (time-subtract (current-time) start-time))))))
 
 ;; --- public interface ------------------------------------------------------
 
@@ -2141,7 +2155,7 @@ being upgraded simultaneously."
     (let ((action (when force 'force)))
       (if (and quelpa-parallel-upgrade-p
                quelpa-async-p
-               (> (length quelpa-cache) 1))
+               (> (length quelpa-cache) 1))  ; Require multiple packages for parallel upgrade
           ;; Use parallel async upgrade
           (quelpa--parallel-upgrade-all-1 quelpa-cache action)
         ;; Use sequential upgrade

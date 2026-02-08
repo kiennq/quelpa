@@ -138,24 +138,23 @@ To run =quelpa-upgrade-all= at most every 7 days, after all the init files are l
 
 **** Parallel and asynchronous upgrades
 
-When upgrading multiple packages, Quelpa can analyze package dependencies and upgrade independent packages in parallel, making the upgrade process faster and non-blocking.
+When upgrading multiple packages, Quelpa can analyze package dependencies and upgrade packages in dependency order, making the upgrade process more efficient.
 
-To enable parallel upgrades, set both =quelpa-parallel-upgrade-p= and =quelpa-async-p= to =t=:
+To enable dependency-aware upgrades, set =quelpa-parallel-upgrade-p= to =t=:
 
 #+BEGIN_SRC elisp
-  (setq quelpa-async-p t)              ; Enable async operations (non-blocking)
-  (setq quelpa-parallel-upgrade-p t)   ; Enable parallel upgrades
-  (setq quelpa-max-parallel-upgrades 4) ; Limit concurrent upgrades
+  (setq quelpa-parallel-upgrade-p t)    ; Enable dependency-aware upgrades
+  (setq quelpa-max-parallel-upgrades 4) ; Limit batch size
 #+END_SRC
 
-When parallel upgrades are enabled:
+When dependency-aware upgrades are enabled:
 - Quelpa builds a dependency graph of packages to be upgraded
-- Packages with no dependencies are upgraded first, in parallel
+- Packages with no dependencies are upgraded first
 - Packages are upgraded as soon as their dependencies are satisfied
-- The upgrade process does not block Emacs input
 - Progress messages show the current status
+- Better error handling for circular dependencies
 
-Note: Parallel upgrades are only used when upgrading multiple packages (e.g., via =quelpa-upgrade-all=).
+Note: Dependency-aware upgrades are only used when upgrading multiple packages (e.g., via =quelpa-upgrade-all=).
 
 ** Managing packages
 

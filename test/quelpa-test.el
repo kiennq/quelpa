@@ -286,25 +286,25 @@ update an existing cache item."
         (completed nil))
     ;; Initially, only package-a is ready (no deps)
     (let ((ready (quelpa--packages-ready-to-upgrade graph completed)))
-      (should (equal (length ready) 1))
+      (should (= (length ready) 1))
       (should (eq (caar ready) 'package-a)))
     
     ;; After package-a completes, package-b is ready
     (setq completed '(package-a))
     (let ((ready (quelpa--packages-ready-to-upgrade graph completed)))
-      (should (equal (length ready) 1))
+      (should (= (length ready) 1))
       (should (eq (caar ready) 'package-b)))
     
     ;; After package-b completes, package-c is ready
     (setq completed '(package-a package-b))
     (let ((ready (quelpa--packages-ready-to-upgrade graph completed)))
-      (should (equal (length ready) 1))
+      (should (= (length ready) 1))
       (should (eq (caar ready) 'package-c)))
     
     ;; After all complete, nothing is ready
     (setq completed '(package-a package-b package-c))
     (let ((ready (quelpa--packages-ready-to-upgrade graph completed)))
-      (should (equal (length ready) 0)))))
+      (should (= (length ready) 0))))))
 
 (ert-deftest quelpa-test-parallel-upgrades-enabled ()
   "Test that parallel upgrades are enabled when configured."
