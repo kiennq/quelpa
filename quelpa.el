@@ -2026,9 +2026,8 @@ in batches. This ensures correct ordering and provides better progress feedback.
       ;; Find packages ready to upgrade
       (let* ((ready (quelpa--packages-ready-to-upgrade graph completed)))
         
-        ;; Deadlock detection: no packages ready but not all done
-        (if (and (null ready)
-                 (< (+ (length completed) (length failed)) total))
+        ;; Deadlock detection: no packages ready
+        (if (null ready)
             (let ((remaining (- total (length completed) (length failed))))
               (when quelpa-verbose
                 (message "Warning: Cannot proceed with %d remaining package(s)" remaining)
