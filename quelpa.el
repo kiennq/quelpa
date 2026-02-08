@@ -180,15 +180,17 @@ quelpa cache."
   :type 'boolean)
 
 (defcustom quelpa-parallel-upgrade-p t
-  "If non-nil, upgrade independent packages in parallel.
+  "If non-nil, upgrade packages in dependency-aware order.
 When upgrading multiple packages, quelpa will analyze dependencies
-and upgrade packages that don't depend on each other in parallel."
+and upgrade packages in the correct order based on their requirements."
   :group 'quelpa
   :type 'boolean)
 
-(defcustom quelpa-max-parallel-upgrades 4
-  "Maximum number of packages to upgrade in parallel.
-Only applies when `quelpa-parallel-upgrade-p' is non-nil."
+(defcustom quelpa-upgrade-batch-size 4
+  "Number of packages to process in each batch during dependency-aware upgrades.
+Only applies when `quelpa-parallel-upgrade-p' is non-nil.
+This controls how many packages are upgraded before checking for newly
+available packages whose dependencies have been satisfied."
   :group 'quelpa
   :type 'integer)
 
@@ -1965,23 +1967,7 @@ version."
     (when-let* ((all-pkgs (alist-get name package-alist)))
       (setf (cdr all-pkgs) nil))))
 
-;; --- parallel async upgrade support ----------------------------------------
-
-(defvar quelpa--upgrade-graph nil
-  "Dependency graph for packages being upgraded.
-This is an alist where each element is (PACKAGE . DEPENDENCIES).")
-
-(defvar quelpa--upgrade-queue nil
-  "Queue of packages waiting to be upgraded.")
-
-(defvar quelpa--upgrade-in-progress nil
-  "List of packages currently being upgraded asynchronously.")
-
-(defvar quelpa--upgrade-completed nil
-  "List of packages that have completed upgrading.")
-
-(defvar quelpa--upgrade-failed nil
-  "List of packages that failed to upgrade.")
+;; --- dependency-aware upgrade support ----------------------------------------
 
 (defun quelpa--get-package-dependencies (rcp)
   "Get the list of package dependencies for recipe RCP.
@@ -2022,35 +2008,10 @@ A package is ready if all its dependencies are in COMPLETED list."
             (cl-every (lambda (dep) (memq dep completed)) deps))))
    graph))
 
-(defun quelpa--upgrade-package-async (rcp action callback)
-  "Upgrade package RCP asynchronously with ACTION.
-Call CALLBACK with (PACKAGE-NAME . SUCCESS) when done."
-  (let* ((name (car (quelpa-arg-rcp rcp)))
-         (quelpa-upgrade-p t)
-         (current-prefix-arg nil)
-         (config (append (cond ((eq action 'force) `(:force t))
-                               ((eq action 'local) `(:use-current-ref t)))
-                         `(:autoremove ,quelpa-autoremove-p))))
-    (run-with-timer
-     0.1 nil
-     (lambda ()
-       (condition-case err
-           (progn
-             (when quelpa-verbose
-               (message "Upgrading package %s..." name))
-             (apply #'quelpa rcp config)
-             (when quelpa-verbose
-               (message "Package %s upgraded successfully" name))
-             (funcall callback (cons name t)))
-         (error
-          (message "Failed to upgrade package %s: %S" name err)
-          (funcall callback (cons name nil))))))))
-
-(defun quelpa--parallel-upgrade-all-1 (recipes action)
+(defun quelpa--dependency-aware-upgrade-all (recipes action)
   "Internal function to upgrade RECIPES respecting dependencies.
-This function upgrades packages in dependency order, upgrading independent
-packages in batches. While not truly parallel due to Emacs single-threading,
-this ensures correct ordering and provides better progress feedback."
+This function upgrades packages in dependency order, processing them
+in batches. This ensures correct ordering and provides better progress feedback."
   (let* ((graph (quelpa--build-upgrade-graph recipes))
          (completed nil)
          (failed nil)
@@ -2065,7 +2026,7 @@ this ensures correct ordering and provides better progress feedback."
       ;; Find packages ready to upgrade
       (let* ((ready (quelpa--packages-ready-to-upgrade graph completed))
              ;; Limit batch size
-             (batch-size (min (length ready) quelpa-max-parallel-upgrades))
+             (batch-size (min (length ready) quelpa-upgrade-batch-size))
              (to-process (cl-subseq ready 0 batch-size)))
         
         ;; Deadlock detection: no packages ready but not all done
@@ -2154,10 +2115,9 @@ being upgraded simultaneously."
       (quelpa-self-upgrade))
     (let ((action (when force 'force)))
       (if (and quelpa-parallel-upgrade-p
-               quelpa-async-p
-               (> (length quelpa-cache) 1))  ; Require multiple packages for parallel upgrade
-          ;; Use parallel async upgrade
-          (quelpa--parallel-upgrade-all-1 quelpa-cache action)
+               (> (length quelpa-cache) 1))  ; Require multiple packages for dependency-aware upgrade
+          ;; Use dependency-aware upgrade
+          (quelpa--dependency-aware-upgrade-all quelpa-cache action)
         ;; Use sequential upgrade
         (mapc (lambda (rcp)
                 (quelpa-upgrade rcp action))

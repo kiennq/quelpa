@@ -136,23 +136,23 @@ To run =quelpa-upgrade-all= at most every 7 days, after all the init files are l
   (add-hook #'after-init-hook #'quelpa-upgrade-all-maybe)
 #+END_SRC
 
-**** Parallel and asynchronous upgrades
+**** Dependency-aware upgrades
 
-When upgrading multiple packages, Quelpa can analyze package dependencies and upgrade packages in dependency order, making the upgrade process more efficient.
+When upgrading multiple packages, Quelpa can analyze package dependencies and upgrade them in the correct order, ensuring dependencies are upgraded before packages that depend on them.
 
 To enable dependency-aware upgrades, set =quelpa-parallel-upgrade-p= to =t=:
 
 #+BEGIN_SRC elisp
-  (setq quelpa-parallel-upgrade-p t)    ; Enable dependency-aware upgrades
-  (setq quelpa-max-parallel-upgrades 4) ; Limit batch size
+  (setq quelpa-parallel-upgrade-p t)   ; Enable dependency-aware upgrades
+  (setq quelpa-upgrade-batch-size 4)   ; Number of packages to process per batch
 #+END_SRC
 
 When dependency-aware upgrades are enabled:
 - Quelpa builds a dependency graph of packages to be upgraded
-- Packages with no dependencies are upgraded first
-- Packages are upgraded as soon as their dependencies are satisfied
+- Packages with no dependencies (or whose dependencies are already upgraded) are processed first
+- Packages are upgraded in batches respecting dependency constraints
 - Progress messages show the current status
-- Better error handling for circular dependencies
+- Improved error handling for circular dependencies and failed prerequisites
 
 Note: Dependency-aware upgrades are only used when upgrading multiple packages (e.g., via =quelpa-upgrade-all=).
 

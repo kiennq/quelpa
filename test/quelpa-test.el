@@ -307,16 +307,15 @@ update an existing cache item."
       (should (= (length ready) 0))))))
 
 (ert-deftest quelpa-test-parallel-upgrades-enabled ()
-  "Test that parallel upgrades are enabled when configured."
+  "Test that dependency-aware upgrades are enabled when configured."
   ;; Test that the configuration variables exist
   (should (boundp 'quelpa-parallel-upgrade-p))
-  (should (boundp 'quelpa-max-parallel-upgrades))
-  (should (boundp 'quelpa-async-p))
+  (should (boundp 'quelpa-upgrade-batch-size))
   
   ;; Test default values
   (should (eq quelpa-parallel-upgrade-p t))
-  (should (numberp quelpa-max-parallel-upgrades))
-  (should (> quelpa-max-parallel-upgrades 0)))
+  (should (numberp quelpa-upgrade-batch-size))
+  (should (> quelpa-upgrade-batch-size 0)))
 
 (ert-deftest quelpa-test-get-package-dependencies ()
   "Test extracting dependencies from a package."
