@@ -200,6 +200,14 @@ thread-local, callers who rebind variables such as
   :group 'quelpa
   :type 'boolean)
 
+(defcustom quelpa-version-type 'melpa
+  "Version type, can be `melpa' or `elpa'.
+`melpa': e.g. 20260102.1223
+`elpa': e.g. 0.1.2.3.20260102.1223"
+  :group 'quelpa
+  :type '(choice (const :tag "melpa" melpa)
+                 (const :tag "elpa" elpa)))
+
 (defvar quelpa--async-running-p nil
   "Non-nil when a quelpa async operation is currently running.")
 
@@ -281,7 +289,7 @@ OP is taking two version list and comparing."
                (`(,name . ,conf) (pcase rcp
                                    (`(,_ . ,_) rcp)
                                    (name `(,name))))
-               (ver-type (plist-get conf :version-type))
+               (ver-type (or (plist-get conf :version-type) quelpa-version-type))
                (pkg-ver
                 (or (when-let* ((pkg-desc (cdr (assq name package-alist)))
                                 (pkg-ver (package-desc-version (car pkg-desc))))
@@ -345,7 +353,7 @@ if no action is necessary (like when the package is installed
 already and should not be upgraded etc)."
   (let* ((name (car rcp))
          (build-dir (expand-file-name (symbol-name name) quelpa-build-dir))
-         (ver-type (plist-get (cdr rcp) :version-type))
+         (ver-type (or (plist-get (cdr rcp) :version-type) quelpa-version-type))
          (files (quelpa-build--config-file-list (cdr rcp)))
          (melpa-ver (quelpa-checkout rcp build-dir))
          (version
