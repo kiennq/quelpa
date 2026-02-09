@@ -481,7 +481,10 @@ and return TIME-STAMP, otherwise return OLD-TIME-STAMP."
              (string= new-content-hash old-content-hash))
         (quelpa-file-version file-path type version old-time-stamp)
       (unless (eq fetcher 'url)
-        (delete-directory dir t)
+        (condition-case err
+            (delete-directory dir t)
+          (error (lwarn 'quelpa :warning
+                        "Failed to remove %s: %s" dir (error-message-string err))))
         (make-directory dir)
         (if (eq type 'file)
             (copy-file file-path dir t t t t)
@@ -841,7 +844,10 @@ A number as third arg means request confirmation if NEWNAME already exists."
         (quelpa-build--run-process dir "darcs" "pull" "--all"))
        (t
         (when (file-exists-p dir)
-          (delete-directory dir t))
+          (condition-case err
+              (delete-directory dir t)
+            (error (lwarn 'quelpa :warning
+                          "Failed to remove %s: %s" dir (error-message-string err)))))
         (quelpa-build--princ-checkout repo dir)
         (quelpa-build--run-process nil "darcs" "get" repo dir)))
       (if quelpa-build-stable
@@ -885,7 +891,10 @@ A number as third arg means request confirmation if NEWNAME already exists."
           (quelpa-build--run-process dir "fossil" "update"))
          (t
           (when (file-exists-p dir)
-            (delete-directory dir t))
+            (condition-case err
+                (delete-directory dir t)
+              (error (lwarn 'quelpa :warning
+                            "Failed to remove %s: %s" dir (error-message-string err)))))
           (quelpa-build--princ-checkout repo dir)
           (make-directory dir)
           (quelpa-build--run-process dir "fossil" "clone" repo "repo.fossil")
@@ -915,7 +924,10 @@ A number as third arg means request confirmation if NEWNAME already exists."
           (quelpa-build--run-process dir "svn" "up"))
          (t
           (when (file-exists-p dir)
-            (delete-directory dir t))
+            (condition-case err
+                (delete-directory dir t)
+              (error (lwarn 'quelpa :warning
+                            "Failed to remove %s: %s" dir (error-message-string err)))))
           (quelpa-build--princ-checkout repo dir)
           (quelpa-build--run-process nil "svn" "checkout" repo dir)))
         (apply 'quelpa-build--run-process dir "svn" "info"
@@ -953,7 +965,10 @@ Return a cons cell whose `car' is the root and whose `cdr' is the repository."
           (quelpa-build--run-process dir "cvs" "update" "-dP"))
          (t
           (when (file-exists-p dir)
-            (delete-directory dir t))
+            (condition-case err
+                (delete-directory dir t)
+              (error (lwarn 'quelpa :warning
+                            "Failed to remove %s: %s" dir (error-message-string err)))))
           (quelpa-build--princ-checkout (format "%s from %s" repo root) dir)
           ;; CVS insists on relative paths as target directory for checkout (for
           ;; whatever reason), and puts "CVS" directories into every subdirectory
@@ -1037,7 +1052,10 @@ Return a cons cell whose `car' is the root and whose `cdr' is the repository."
         (quelpa-build--run-process dir "git" "fetch" "--tags" remote))
        (t
         (when (file-exists-p dir)
-          (delete-directory dir t))
+          (condition-case err
+              (delete-directory dir t)
+            (error (lwarn 'quelpa :warning
+                          "Failed to remove %s: %s" dir (error-message-string err)))))
         (quelpa-build--princ-checkout repo dir)
         (apply #'quelpa-build--run-process
                (append
@@ -1152,7 +1170,10 @@ This will perform an checkout or a reset if FORCE."
         (quelpa-build--run-process dir "bzr" "merge" "--force"))
        (t
         (when (file-exists-p dir)
-          (delete-directory dir t))
+          (condition-case err
+              (delete-directory dir t)
+            (error (lwarn 'quelpa :warning
+                          "Failed to remove %s: %s" dir (error-message-string err)))))
         (quelpa-build--princ-checkout repo dir)
         (quelpa-build--run-process nil "bzr" "branch" repo dir)))
       (if quelpa-build-stable
@@ -1197,7 +1218,10 @@ This will perform an checkout or a reset if FORCE."
         (quelpa-build--run-process dir "hg" "update"))
        (t
         (when (file-exists-p dir)
-          (delete-directory dir t))
+          (condition-case err
+              (delete-directory dir t)
+            (error (lwarn 'quelpa :warning
+                          "Failed to remove %s: %s" dir (error-message-string err)))))
         (quelpa-build--princ-checkout repo dir)
         (quelpa-build--run-process nil "hg" "clone" repo dir)))
       (if quelpa-build-stable
@@ -1742,7 +1766,7 @@ Returns the archive entry for the package."
              (quelpa-build--find-package-commentary pkg-source)
              package-name))
           (quelpa-build--archive-entry pkg-info 'tar))
-      (delete-directory tmp-dir t nil))))
+      (ignore-errors (delete-directory tmp-dir t nil)))))
 
 (defun quelpa-build--checkout-file (name config dir)
   "Build according to a PATH with config CONFIG into DIR as NAME.
