@@ -2181,6 +2181,65 @@ did not need building."
           (thread-join thr))))
     (nreverse results)))
 
+(defun quelpa--collect-missing-deps (built-index)
+  "Return a list of dependency package names not yet in BUILT-INDEX.
+Scans all entries in BUILT-INDEX for requirements that are:
+- Not `emacs'
+- Not already in BUILT-INDEX
+- Not already installed at the required version.
+Each entry in the returned list is a symbol (package name)."
+  (let (missing)
+    (maphash
+     (lambda (_name entry)
+       (unless (eq entry 'failed)
+         (let ((pkg-desc (nth 2 entry)))
+           (when pkg-desc
+           (dolist (req (package-desc-reqs pkg-desc))
+             (let ((dep-name (car req))
+                   (dep-ver (cadr req)))
+               (unless (or (eq dep-name 'emacs)
+                           (gethash dep-name built-index)
+                           (quelpa--package-installed-p dep-name dep-ver)
+                           (memq dep-name missing))
+                  (push dep-name missing))))))))
+     built-index)
+    missing))
+
+(defun quelpa--parallel-build-deps (built-index)
+  "Iteratively discover and parallel-build dependency packages.
+Scans packages in BUILT-INDEX for unresolved dependencies,
+builds them in parallel, merges results into BUILT-INDEX, and
+repeats until no new dependencies are found.
+
+Deps that fail to build (missing recipe, build error, etc.) are
+recorded with a `failed' sentinel in BUILT-INDEX so they are not
+retried.  The install phase skips these entries.
+
+Returns BUILT-INDEX (mutated in place)."
+  (let ((new-deps (quelpa--collect-missing-deps built-index)))
+    (while new-deps
+      (quelpa-message nil "parallel-building %d dependency package(s): %s"
+                      (length new-deps)
+                      (mapconcat #'symbol-name new-deps ", "))
+      (let* ((dep-entries
+              (mapcar (lambda (dep-name)
+                        ;; Create a deferred-queue-style entry (ARG . PLIST)
+                        ;; with :upgrade t so dependencies get rebuilt if needed.
+                        (cons dep-name '(:upgrade t)))
+                      new-deps))
+             (dep-built (quelpa--parallel-build dep-entries))
+             (built-names (mapcar #'car dep-built)))
+        ;; Merge newly built deps into the index.
+        (dolist (b dep-built)
+          (puthash (car b) b built-index))
+        ;; Mark deps that failed to build so we don't retry them.
+        (dolist (dep-name new-deps)
+          (unless (memq dep-name built-names)
+            (puthash dep-name 'failed built-index))))
+      ;; Check if the newly built deps introduced further deps.
+      (setq new-deps (quelpa--collect-missing-deps built-index))))
+  built-index)
+
 (defun quelpa--install-with-deps (entry built-index installed)
   "Install ENTRY, first recursively installing deps from BUILT-INDEX.
 ENTRY is a list (NAME FILE PKG-DESC RCP PLIST) as returned by
@@ -2200,9 +2259,10 @@ tracking already-installed names to avoid double-installs."
             (unless (or (eq dep-name 'emacs)
                         (gethash dep-name installed)
                         (quelpa--package-installed-p dep-name (cadr req)))
-              (if-let* ((dep-entry (gethash dep-name built-index)))
-                  (quelpa--install-with-deps dep-entry built-index installed)
-                (quelpa-package-install dep-name)))))
+              (let ((dep-entry (gethash dep-name built-index)))
+                (if (and dep-entry (not (eq dep-entry 'failed)))
+                    (quelpa--install-with-deps dep-entry built-index installed)
+                  (quelpa-package-install dep-name))))))
         ;; Install this package.
         (let ((quelpa-upgrade-p quelpa-upgrade-p)
               (quelpa-stable-p quelpa-stable-p)
@@ -2245,6 +2305,10 @@ When `quelpa-async-p' is non-nil, delegates to `quelpa-process-queue-async'."
                (installed (make-hash-table :test 'eq)))
           (dolist (b built)
             (puthash (car b) b built-index))
+          ;; Iteratively discover and parallel-build dependency packages
+          ;; so that deps are also built concurrently rather than
+          ;; falling back to synchronous one-at-a-time builds.
+          (quelpa--parallel-build-deps built-index)
           ;; Install each package, recursively installing deps first.
           (dolist (b built)
             (quelpa--install-with-deps b built-index installed)))))))

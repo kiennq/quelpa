@@ -418,6 +418,119 @@ update an existing cache item."
     (quelpa-process-queue)
     (should (null quelpa--deferred-queue))))
 
+(ert-deftest quelpa-process-queue-dep-parallel-build ()
+  "Dependencies not in the queue should be discovered and parallel-built."
+  (quelpa-test-sandbox
+    (should (quelpa-setup-p))
+    (let* ((quelpa--deferred-queue nil)
+           (installed-order nil)
+           (build-threads nil)
+           ;; baz depends on qux, which is NOT in the deferred queue.
+           ;; qux itself depends on quux (also not queued).
+           (desc-baz (record 'package-desc 'baz '(1 0) "baz"
+                             '((qux (1 0))) nil nil "test" nil nil))
+           (desc-qux (record 'package-desc 'qux '(1 0) "qux"
+                             '((quux (1 0))) nil nil "test" nil nil))
+           (desc-quux (record 'package-desc 'quux '(1 0) "quux"
+                              nil nil nil "test" nil nil)))
+      (cl-letf (((symbol-function 'quelpa-build)
+                 (lambda (rcp)
+                   (let ((name (car rcp)))
+                     ;; Track which thread built this package.
+                     (push (cons name (thread-name (current-thread)))
+                           build-threads)
+                     (format "/tmp/%s.el" name))))
+                ((symbol-function 'quelpa-arg-rcp)
+                 (lambda (arg)
+                   ;; Return fake recipes for dep packages.
+                   (let ((name (if (listp arg) (car arg) arg)))
+                     (pcase name
+                       ('baz '(baz :fetcher github :repo "u/baz"))
+                       ('qux '(qux :fetcher github :repo "u/qux"))
+                       ('quux '(quux :fetcher github :repo "u/quux"))
+                       (_ nil)))))
+                ((symbol-function 'quelpa-get-package-desc)
+                 (lambda (file)
+                   (cond ((string-match "baz" file) desc-baz)
+                         ((string-match "qux" file)
+                          (if (string-match "quux" file) desc-quux desc-qux))
+                         ((string-match "quux" file) desc-quux))))
+                ((symbol-function 'quelpa-package-install-file)
+                 (lambda (file)
+                   (push (cond ((string-match "quux" file) 'quux)
+                               ((string-match "qux" file) 'qux)
+                               ((string-match "baz" file) 'baz))
+                         installed-order)))
+                ((symbol-function 'quelpa--delete-obsoleted-package)
+                 #'ignore)
+                ((symbol-function 'quelpa--package-installed-p)
+                 (lambda (name &optional _min-version)
+                   (memq name installed-order))))
+        ;; Only defer baz -- qux and quux are deps that should be
+        ;; discovered and parallel-built automatically.
+        (quelpa '(baz :fetcher github :repo "u/baz") :defer t)
+        (should (= (length quelpa--deferred-queue) 1))
+        ;; Process the queue.
+        (quelpa-process-queue)
+        ;; Queue should be drained.
+        (should (null quelpa--deferred-queue))
+        ;; All three should be installed.
+        (let ((order (nreverse installed-order)))
+          ;; quux must come before qux, qux before baz.
+          (should (< (cl-position 'quux order)
+                     (cl-position 'qux order)))
+          (should (< (cl-position 'qux order)
+                     (cl-position 'baz order))))
+        ;; qux and quux should have been built in build threads
+        ;; (not the main thread), proving parallel-build was used.
+        (should (assq 'qux build-threads))
+        (should (assq 'quux build-threads))))))
+
+(ert-deftest quelpa-process-queue-dep-build-failure ()
+  "Deps that fail to build should not cause infinite loops."
+  (quelpa-test-sandbox
+    (should (quelpa-setup-p))
+    (let* ((quelpa--deferred-queue nil)
+           (installed-order nil)
+           ;; baz depends on missing-pkg, which has no recipe.
+           (desc-baz (record 'package-desc 'baz '(1 0) "baz"
+                             '((missing-pkg (1 0))) nil nil "test" nil nil)))
+      (cl-letf (((symbol-function 'quelpa-build)
+                 (lambda (rcp)
+                   (let ((name (car rcp)))
+                     (format "/tmp/%s.el" name))))
+                ((symbol-function 'quelpa-arg-rcp)
+                 (lambda (arg)
+                   (let ((name (if (listp arg) (car arg) arg)))
+                     (pcase name
+                       ('baz '(baz :fetcher github :repo "u/baz"))
+                       ;; missing-pkg has no recipe.
+                       ('missing-pkg nil)
+                       (_ nil)))))
+                ((symbol-function 'quelpa-get-package-desc)
+                 (lambda (file)
+                   (when (string-match "baz" file) desc-baz)))
+                ((symbol-function 'quelpa-package-install-file)
+                 (lambda (file)
+                   (when (string-match "baz" file)
+                     (push 'baz installed-order))))
+                ((symbol-function 'quelpa-package-install)
+                 (lambda (name &rest _)
+                   ;; Fallback sync install for missing-pkg.
+                   (push name installed-order)
+                   nil))
+                ((symbol-function 'quelpa--delete-obsoleted-package)
+                 #'ignore)
+                ((symbol-function 'quelpa--package-installed-p)
+                 (lambda (name &optional _min-version)
+                   (memq name installed-order))))
+        (quelpa '(baz :fetcher github :repo "u/baz") :defer t)
+        (quelpa-process-queue)
+        (should (null quelpa--deferred-queue))
+        ;; baz should still be installed (missing-pkg falls back to sync).
+        (should (memq 'baz installed-order))
+        (should (memq 'missing-pkg installed-order))))))
+
 ;;;; Footer
 
 (provide 'quelpa-tests)
