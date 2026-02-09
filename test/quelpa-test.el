@@ -5,29 +5,52 @@
 
 ;;; Test infrastructure
 
+(defvar quelpa-test--shared-melpa-dir nil
+  "Path to a shared MELPA checkout, created once for all tests.
+Avoids cloning MELPA for every individual test.")
+
+(defun quelpa-test--ensure-shared-melpa ()
+  "Ensure a shared MELPA checkout exists and return its path.
+On first call, clones MELPA into a temp directory.  Subsequent
+calls return the cached path immediately."
+  (unless (and quelpa-test--shared-melpa-dir
+               (file-directory-p
+                (expand-file-name ".git" quelpa-test--shared-melpa-dir)))
+    (let ((quelpa-melpa-dir (make-temp-file "quelpa-test-melpa-" t)))
+      (quelpa-checkout-melpa t)
+      (setq quelpa-test--shared-melpa-dir quelpa-melpa-dir)))
+  quelpa-test--shared-melpa-dir)
+
 (defmacro quelpa-test-sandbox (&rest body)
   "Run BODY with all quelpa/package paths redirected to a temp directory.
 Creates a fresh temporary `user-emacs-directory' so that tests never
-install packages into the real Emacs configuration.  The sandbox
+install packages into the real Emacs configuration.  MELPA is
+checked out once and shared read-only across all sandboxes; each
+sandbox gets its own writable recipes directory.  The sandbox
 directory is deleted when BODY finishes (or signals)."
   (declare (indent 0) (debug t))
-  `(let* ((sandbox (make-temp-file "quelpa-test-" t))
+  `(let* ((shared-melpa (quelpa-test--ensure-shared-melpa))
+          (sandbox (make-temp-file "quelpa-test-" t))
           (user-emacs-directory (file-name-as-directory sandbox))
           (quelpa-dir (expand-file-name "quelpa" user-emacs-directory))
-          (quelpa-melpa-dir (expand-file-name "melpa" quelpa-dir))
+          (quelpa-melpa-dir shared-melpa)
           (quelpa-build-dir (expand-file-name "build" quelpa-dir))
           (quelpa-packages-dir (expand-file-name "packages" quelpa-dir))
           (quelpa-persistent-cache-file (expand-file-name "cache" quelpa-dir))
-          (quelpa-melpa-recipe-stores (list (expand-file-name
-                                            "recipes" quelpa-melpa-dir)))
-           (package-user-dir (expand-file-name "elpa" user-emacs-directory))
-           ;; Reset state so `quelpa-setup-p' re-initializes.
+          ;; Per-sandbox writable recipes dir + shared MELPA recipes.
+          (sandbox-recipes-dir (expand-file-name "recipes" quelpa-dir))
+          (quelpa-melpa-recipe-stores
+           (list sandbox-recipes-dir
+                 (expand-file-name "recipes" shared-melpa)))
+          (package-user-dir (expand-file-name "elpa" user-emacs-directory))
+          ;; Reset state so `quelpa-setup-p' re-initializes.
           (quelpa-initialized-p nil)
           (quelpa-cache nil)
-          (package-alist nil))
-     ;; Ensure the recipes directory exists so `directory-files'
-     ;; inside `quelpa-get-melpa-recipe' doesn't signal.
-     (make-directory (car quelpa-melpa-recipe-stores) t)
+          (package-alist nil)
+          ;; Shared MELPA is already cloned; skip update attempts.
+          (quelpa-update-melpa-p nil))
+     ;; Ensure the per-sandbox recipes directory exists.
+     (make-directory sandbox-recipes-dir t)
      (unwind-protect
          (progn ,@body)
        (delete-directory sandbox t))))
@@ -304,7 +327,96 @@ update an existing cache item."
                    :fetcher file
                    :files ("*.el" "emacs-helm.sh"
                            (:exclude "helm.el" "helm-lib.el" "helm-source.el" "helm-match-plugin.el" "helm-core-pkg.el"))
-                   :path "~/emacs-packages/helm")))
+                    :path "~/emacs-packages/helm")))
+
+;;;; Parallel upgrade / defer tests
+
+(ert-deftest quelpa-plist-remove ()
+  "Test `quelpa--plist-remove'."
+  (should (equal (quelpa--plist-remove '(:a 1 :b 2 :c 3) :b)
+                 '(:a 1 :c 3)))
+  (should (equal (quelpa--plist-remove '(:a 1 :b 2 :c 3) :a :c)
+                 '(:b 2)))
+  (should (equal (quelpa--plist-remove '(:a 1) :a)
+                 nil))
+  (should (equal (quelpa--plist-remove nil :a)
+                 nil))
+  (should (equal (quelpa--plist-remove '(:a 1 :b 2) :z)
+                 '(:a 1 :b 2))))
+
+(ert-deftest quelpa-defer ()
+  "`:defer t' should queue the package, not install it."
+  (quelpa-test-sandbox
+    (should (quelpa-setup-p))
+    (let ((quelpa--deferred-queue nil))
+      ;; Mock quelpa-package-install to detect if it's called.
+      (cl-letf (((symbol-function 'quelpa-package-install)
+                 (lambda (&rest _) (error "should not be called"))))
+        (quelpa '(foo :fetcher github :repo "user/foo") :defer t)
+        (quelpa '(bar :fetcher github :repo "user/bar") :defer t :upgrade t))
+      ;; Queue should have two entries, in push order (LIFO).
+      (should (= (length quelpa--deferred-queue) 2))
+      ;; First pushed = last in list (push prepends).
+      (should (equal (caar quelpa--deferred-queue)
+                     '(bar :fetcher github :repo "user/bar")))
+      (should (equal (cdar quelpa--deferred-queue)
+                     '(:upgrade t)))
+      (should (equal (car (cadr quelpa--deferred-queue))
+                     '(foo :fetcher github :repo "user/foo")))
+      ;; :defer should be stripped from the stored plist.
+      (should-not (plist-get (cdar quelpa--deferred-queue) :defer))
+      (should-not (plist-get (cdr (cadr quelpa--deferred-queue)) :defer)))))
+
+(ert-deftest quelpa-process-queue-basic ()
+  "Integration test: defer two packages, then process the queue."
+  (quelpa-test-sandbox
+    (should (quelpa-setup-p))
+    (let* ((quelpa--deferred-queue nil)
+           (installed-order nil)
+           ;; Mock: quelpa-build returns a fake file, quelpa-arg-rcp
+           ;; returns the recipe, quelpa-get-package-desc returns a
+           ;; pkg-desc.
+           (desc-foo (record 'package-desc 'foo '(1 0) "foo" nil
+                             nil nil "test" nil nil))
+           (desc-bar (record 'package-desc 'bar '(1 0) "bar"
+                             '((foo (1 0))) nil nil "test" nil nil)))
+      (cl-letf (((symbol-function 'quelpa-build)
+                 (lambda (rcp)
+                   (let ((name (car rcp)))
+                     (format "/tmp/%s.el" name))))
+                ((symbol-function 'quelpa-get-package-desc)
+                 (lambda (file)
+                   (cond ((string-match "foo" file) desc-foo)
+                         ((string-match "bar" file) desc-bar))))
+                ((symbol-function 'quelpa-package-install-file)
+                 (lambda (file)
+                   (push (if (string-match "foo" file) 'foo 'bar)
+                         installed-order)))
+                ((symbol-function 'quelpa--delete-obsoleted-package)
+                 #'ignore)
+                ((symbol-function 'quelpa--package-installed-p)
+                 (lambda (name &optional _min-version)
+                   ;; After foo is "installed", report it as installed.
+                   (memq name installed-order))))
+        ;; Defer two packages.
+        (quelpa '(foo :fetcher github :repo "u/foo") :defer t)
+        (quelpa '(bar :fetcher github :repo "u/bar") :defer t)
+        (should (= (length quelpa--deferred-queue) 2))
+        ;; Process the queue.
+        (quelpa-process-queue)
+        ;; Queue should be drained.
+        (should (null quelpa--deferred-queue))
+        ;; foo should be installed before bar (bar depends on foo).
+        (should (equal (nreverse installed-order) '(foo bar)))
+        ;; Both should be in the cache.
+        (should (assq 'foo quelpa-cache))
+        (should (assq 'bar quelpa-cache))))))
+
+(ert-deftest quelpa-process-queue-empty ()
+  "Processing an empty queue should be a no-op."
+  (let ((quelpa--deferred-queue nil))
+    (quelpa-process-queue)
+    (should (null quelpa--deferred-queue))))
 
 ;;;; Footer
 

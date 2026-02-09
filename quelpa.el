@@ -6,7 +6,7 @@
 ;; Author: steckerhalter
 ;; URL: https://github.com/quelpa/quelpa
 ;; Version: 1.0
-;; Package-Requires: ((emacs "25.1"))
+;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: tools package management build source elpa
 
 ;; This file is not part of GNU Emacs.
@@ -69,6 +69,16 @@ the `:upgrade' argument."
   "When non-nil, automatically remove old packages after upgrading.
 The global value can be overridden for each package by supplying the
 `:autoremove' argument."
+  :group 'quelpa
+  :type 'boolean)
+
+(defcustom quelpa-defer-p nil
+  "When non-nil, `quelpa' defers operations to the queue by default.
+Each call to `quelpa' pushes the package onto `quelpa--deferred-queue'
+instead of building immediately.  Call `quelpa-process-queue' to drain
+the queue and build all deferred packages in parallel.
+The global value can be overridden for each package by supplying the
+`:defer' argument."
   :group 'quelpa
   :type 'boolean)
 
@@ -193,6 +203,9 @@ thread-local, callers who rebind variables such as
 (defvar quelpa--async-running-p nil
   "Non-nil when a quelpa async operation is currently running.")
 
+(defvar quelpa--async-thread nil
+  "The currently running quelpa async thread, or nil.")
+
 (defvar quelpa--async-queue nil
   "Queue of pending async quelpa operations.
 Each entry is a cons cell (FUNC . CALLBACK).")
@@ -200,6 +213,17 @@ Each entry is a cons cell (FUNC . CALLBACK).")
 (defvar quelpa--in-async-context nil
   "Non-nil when the current code is executing inside a quelpa async thread.
 Used to prevent `quelpa' from re-entering async dispatch.")
+
+(defvar quelpa--deferred-queue nil
+  "Queue of deferred quelpa operations.
+Each entry is a cons cell (ARG . PLIST) as passed to `quelpa'.
+Populated when `quelpa' is called with `:defer t' in the plist.
+Drained by `quelpa-process-queue'.")
+
+(defvar quelpa--upgrading-all nil
+  "Non-nil while `quelpa-upgrade-all' is running its upgrade loop.
+Suppresses per-package queue draining in `quelpa-upgrade' so
+the batch can be processed once at the end.")
 
 (defvar quelpa-initialized-p nil
   "Non-nil when quelpa has been initialized.")
@@ -1868,6 +1892,16 @@ If RCP cannot be found it will be set to nil"
     (`(,_name . ,_) arg)
     (name (quelpa-get-melpa-recipe name))))
 
+(defun quelpa--plist-remove (plist &rest keys)
+  "Return a copy of PLIST with KEYS and their values removed."
+  (let (result)
+    (while plist
+      (unless (memq (car plist) keys)
+        (push (car plist) result)
+        (push (cadr plist) result))
+      (setq plist (cddr plist)))
+    (nreverse result)))
+
 (defun quelpa-parse-plist (plist)
   "Parse the optional PLIST argument of `quelpa'.
 Recognized keywords are:
@@ -1882,14 +1916,20 @@ If t, `quelpa' tries building the stable version of a package.
 
 :autoremove
 
-If t, `quelpa' tries to remove obsoleted packages."
+If t, `quelpa' tries to remove obsoleted packages.
+
+:defer
+
+If t, `quelpa' pushes the operation onto `quelpa--deferred-queue'
+instead of building immediately."
   (while plist
     (let ((key (car plist))
           (value (cadr plist)))
       (pcase key
         (:upgrade (setq quelpa-upgrade-p value))
         (:stable (setq quelpa-stable-p value))
-        (:autoremove (setq quelpa-autoremove-p value))))
+        (:autoremove (setq quelpa-autoremove-p value))
+        (:defer (setq quelpa-defer-p value))))
     (setq plist (cddr plist))))
 
 (defun quelpa-package-install-file (file)
@@ -1968,42 +2008,220 @@ version."
 
 ;; --- async infrastructure ---------------------------------------------------
 
+(defun quelpa--live-threads ()
+  "Return a list of live threads whose name starts with \"quelpa-\"."
+  (cl-remove-if-not
+   (lambda (thr)
+     (and (not (eq thr (current-thread)))
+          (thread-live-p thr)
+          (string-prefix-p "quelpa-" (or (thread-name thr) ""))))
+   (all-threads)))
+
 (defun quelpa--async-start (func)
   "Run FUNC in a background thread.
 If an async quelpa operation is already running, queue this one.
-Requires Emacs 26+ for `make-thread'."
-  (unless (fboundp 'make-thread)
-    (error "Async quelpa requires Emacs 26+ (for thread support)"))
+Automatically recovers stale state when no quelpa threads are
+alive but `quelpa--async-running-p' is still set."
+  ;; Auto-recover: flag says running but no quelpa thread is alive.
+  (when (and quelpa--async-running-p
+             (null (quelpa--live-threads)))
+    (quelpa-message nil "stale async state detected, resetting")
+    (setq quelpa--async-running-p nil
+          quelpa--async-thread nil))
   (if quelpa--async-running-p
       ;; Serialize: queue the operation for later.
       (setq quelpa--async-queue
             (nconc quelpa--async-queue (list func)))
     (setq quelpa--async-running-p t)
     (quelpa-message nil "starting async operation...")
-    (make-thread
-     (lambda ()
-       (let ((error-msg nil)
-             (quelpa--in-async-context t))
-         (condition-case err
-             (funcall func)
-           (error
-            (setq error-msg (error-message-string err))))
-         ;; Schedule queue processing on the main thread.
-         ;; `run-at-time' is safe to call from any thread.
-         (run-at-time
-          0 nil
-          (lambda ()
-            (setq quelpa--async-running-p nil)
-            (if error-msg
-                (quelpa-message t "async error: %s" error-msg)
-              (quelpa-message nil "async operation finished"))
-            (quelpa--async-process-queue)))))
-     "quelpa-async")))
+    (setq quelpa--async-thread
+          (make-thread
+           (lambda ()
+             (let ((error-msg nil)
+                   (quelpa--in-async-context t))
+               (condition-case err
+                   (funcall func)
+                 (error
+                  (setq error-msg (error-message-string err))))
+               ;; Schedule queue processing on the main thread.
+               ;; `run-at-time' is safe to call from any thread.
+               (run-at-time
+                0 nil
+                (lambda ()
+                  (setq quelpa--async-running-p nil
+                        quelpa--async-thread nil)
+                  (if error-msg
+                      (quelpa-message t "async error: %s" error-msg)
+                    (quelpa-message nil "async operation finished"))
+                  (quelpa--async-process-queue)))))
+           "quelpa-async"))))
 
 (defun quelpa--async-process-queue ()
   "Process the next pending item in `quelpa--async-queue', if any."
   (when-let* ((next (pop quelpa--async-queue)))
     (quelpa--async-start next)))
+
+;;;###autoload
+(defun quelpa-reset ()
+  "Reset quelpa async and deferred state.
+Signal any orphaned quelpa threads and clear all async/queue state.
+Use this when an async operation was interrupted (e.g. by
+\\[keyboard-quit]) and quelpa is stuck refusing to start new
+operations because it thinks one is still running."
+  (interactive)
+  (let ((threads (quelpa--live-threads)))
+    (dolist (thr threads)
+      (thread-signal thr 'quit nil))
+    (setq quelpa--async-running-p nil
+          quelpa--async-thread nil
+          quelpa--async-queue nil
+          quelpa--deferred-queue nil
+          quelpa--upgrading-all nil)
+    (if threads
+        (quelpa-message nil "quelpa state reset, signalled %d thread(s)"
+                        (length threads))
+      (quelpa-message nil "quelpa state reset"))))
+
+;; --- parallel build infrastructure ------------------------------------------
+
+(defcustom quelpa-parallel-batch-size 0
+  "Maximum number of packages to checkout and build simultaneously.
+Used by `quelpa-process-queue' to limit thread concurrency.
+Set to 0 for no restriction (all packages built concurrently).
+Set to 1 to disable parallel builds."
+  :group 'quelpa
+  :type 'natnum)
+
+(defun quelpa--parallel-build (entries)
+  "Checkout and build all ENTRIES in parallel, return results.
+ENTRIES is a list of (ARG . PLIST) cons cells as stored in
+`quelpa--deferred-queue'.
+
+Spawns up to `quelpa-parallel-batch-size' threads at a time.
+Each thread resolves the recipe, runs `quelpa-build', and stores
+the result.  Returns an alist of (NAME FILE PKG-DESC RCP PLIST)
+for packages that produced a file, or nil entries for those that
+did not need building."
+  (let* ((mutex (make-mutex "quelpa-parallel-build"))
+         (batch-size (if (zerop quelpa-parallel-batch-size)
+                         (length entries)
+                       (max 1 quelpa-parallel-batch-size)))
+         (recipe-stores quelpa-melpa-recipe-stores)
+         (results nil))
+    ;; Process in batches.
+    (while entries
+      (let ((batch (cl-subseq entries 0 (min batch-size (length entries))))
+            (threads nil))
+        (setq entries (nthcdr (length batch) entries))
+        (dolist (entry batch)
+          (let ((entry entry)) ;capture for closure
+            (push
+             (make-thread
+              (lambda ()
+                (let* ((arg (car entry))
+                       (plist (cdr entry))
+                       (quelpa-upgrade-p quelpa-upgrade-p)
+                       (quelpa-stable-p quelpa-stable-p)
+                       (quelpa-autoremove-p quelpa-autoremove-p)
+                       (quelpa-melpa-recipe-stores recipe-stores)
+                       (quelpa--in-async-context t))
+                  (quelpa-parse-plist plist)
+                  (condition-case err
+                      (let* ((rcp (quelpa-arg-rcp arg))
+                             (file (when rcp
+                                     (quelpa-build (append rcp plist)))))
+                        (when file
+                          (let ((pkg-desc (quelpa-get-package-desc file)))
+                            (with-mutex mutex
+                              (push (list (car rcp) file pkg-desc rcp plist)
+                                    results)))))
+                    (error
+                     (quelpa-message
+                      t "parallel build error for %s: %s"
+                      (or (and (listp arg) (car arg)) arg)
+                      (error-message-string err))))))
+              (format "quelpa-build-%s"
+                      (or (and (listp (car entry)) (caar entry))
+                          (car entry))))
+             threads)))
+        ;; Wait for the batch to finish.
+        (dolist (thr threads)
+          (thread-join thr))))
+    (nreverse results)))
+
+(defun quelpa--install-with-deps (entry built-index installed)
+  "Install ENTRY, first recursively installing deps from BUILT-INDEX.
+ENTRY is a list (NAME FILE PKG-DESC RCP PLIST) as returned by
+`quelpa--parallel-build'.  BUILT-INDEX is a hash-table mapping
+package names to their entries.  INSTALLED is a hash-table
+tracking already-installed names to avoid double-installs."
+  (let ((name (nth 0 entry)))
+    (unless (gethash name installed)
+      (let* ((file (nth 1 entry))
+             (pkg-desc (nth 2 entry))
+             (rcp (nth 3 entry))
+             (plist (nth 4 entry))
+             (requires (package-desc-reqs pkg-desc)))
+        ;; Install deps from our batch first.
+        (dolist (req requires)
+          (let ((dep-name (car req)))
+            (unless (or (eq dep-name 'emacs)
+                        (gethash dep-name installed)
+                        (quelpa--package-installed-p dep-name (cadr req)))
+              (if-let* ((dep-entry (gethash dep-name built-index)))
+                  (quelpa--install-with-deps dep-entry built-index installed)
+                (quelpa-package-install dep-name)))))
+        ;; Install this package.
+        (let ((quelpa-upgrade-p quelpa-upgrade-p)
+              (quelpa-stable-p quelpa-stable-p)
+              (quelpa-autoremove-p quelpa-autoremove-p))
+          (quelpa-parse-plist plist)
+          (quelpa-package-install-file file)
+          (when quelpa-autoremove-p
+            (quelpa--delete-obsoleted-package
+             (car rcp) (package-desc-version pkg-desc)))
+          (quelpa-update-cache rcp)
+          (puthash name t installed))))))
+
+;;;###autoload
+(defun quelpa-process-queue ()
+  "Process all deferred quelpa operations from `quelpa--deferred-queue'.
+Packages are checked out and built in parallel, then installed
+sequentially.  Dependencies within the built batch are resolved
+recursively so that each package's deps are installed first.
+
+Cached recipes in `quelpa-cache' are prepended to
+`quelpa-melpa-recipe-stores' during recipe resolution so that
+previously-installed package recipes take priority.
+
+When `quelpa-async-p' is non-nil, delegates to `quelpa-process-queue-async'."
+  (interactive)
+  (if (and quelpa-async-p (not quelpa--in-async-context))
+      (quelpa-process-queue-async)
+    (if (not quelpa--deferred-queue)
+        (quelpa-message nil "no deferred packages to process")
+      (when (quelpa-setup-p)
+        (let* ((entries (nreverse quelpa--deferred-queue))
+               (_ (setq quelpa--deferred-queue nil))
+               ;; Prepend quelpa-cache so cached recipes are found first.
+               (quelpa-melpa-recipe-stores
+                (cons quelpa-cache quelpa-melpa-recipe-stores))
+               ;; Parallel checkout + build.
+               (built (quelpa--parallel-build entries))
+               ;; Index built packages by name for O(1) lookup.
+               (built-index (make-hash-table :test 'eq))
+               (installed (make-hash-table :test 'eq)))
+          (dolist (b built)
+            (puthash (car b) b built-index))
+          ;; Install each package, recursively installing deps first.
+          (dolist (b built)
+            (quelpa--install-with-deps b built-index installed)))))))
+
+;;;###autoload
+(defun quelpa-process-queue-async ()
+  "Like `quelpa-process-queue' but runs in a background thread."
+  (interactive)
+  (quelpa--async-start #'quelpa-process-queue))
 
 ;; --- public interface ------------------------------------------------------
 
@@ -2036,16 +2254,23 @@ This provides an easy way to upgrade all the packages for which
 the `quelpa' command has been run in the current Emacs session.
 With prefix FORCE, packages will all be upgraded discarding local changes.
 
-When `quelpa-async-p' is non-nil, delegates to `quelpa-upgrade-all-async'."
+When `quelpa-async-p' is non-nil, delegates to `quelpa-upgrade-all-async'.
+
+Packages are checked out and built in parallel using the deferred
+queue, then installed sequentially with dependency ordering."
   (interactive "P")
   (if (and quelpa-async-p (not quelpa--in-async-context))
       (quelpa-upgrade-all-async force)
     (when (quelpa-setup-p)
       (when quelpa-self-upgrade-p
         (quelpa-self-upgrade))
-      (mapc (lambda (rcp)
-              (quelpa-upgrade rcp (when force 'force)))
-            quelpa-cache))))
+      ;; Defer all upgrades into the queue, then process in parallel.
+      (let ((quelpa-defer-p t)
+            (quelpa--upgrading-all t))
+        (mapc (lambda (rcp)
+                (quelpa-upgrade rcp (when force 'force)))
+              quelpa-cache)
+        (quelpa-process-queue)))))
 
 ;;;###autoload
 (defun quelpa-upgrade (rcp &optional action)
@@ -2055,7 +2280,10 @@ Optionally, ACTION can be passed for non-interactive call with value of:
 - `local' (or \\[universal-argument] \\[universal-argument] \\[quelpa-upgrade])
   for upgrade using current working tree.
 
-When `quelpa-async-p' is non-nil, delegates to `quelpa-upgrade-async'."
+When `quelpa-async-p' is non-nil, delegates to `quelpa-upgrade-async'.
+When `quelpa-defer-p' is non-nil and this is not part of a
+`quelpa-upgrade-all' batch, the deferred queue is processed
+automatically via `quelpa-process-queue'."
   (interactive
    (let ((prefix (prefix-numeric-value current-prefix-arg)))
      (list nil
@@ -2069,13 +2297,16 @@ When `quelpa-async-p' is non-nil, delegates to `quelpa-upgrade-async'."
                              (list (cl-remove-if-not #'quelpa--package-installed-p
                                                      quelpa-cache :key #'car))))
                         (quelpa-interactive-candidate))))
-             (quelpa-upgrade-p t)
              (current-prefix-arg nil)
              (config (append (cond ((eq action 'force) `(:force t))
                                    ((eq action 'local) `(:use-current-ref t)))
-                             `(:autoremove ,quelpa-autoremove-p))))
+                             `(:upgrade t :autoremove ,quelpa-autoremove-p))))
         (when (quelpa--package-installed-p (car (quelpa-arg-rcp rcp)))
-          (apply #'quelpa rcp config))))))
+          (apply #'quelpa rcp config)))
+      ;; Drain deferred queue for standalone calls (not inside
+      ;; quelpa-upgrade-all's batch loop).
+      (when (and quelpa-defer-p (not quelpa--upgrading-all))
+        (quelpa-process-queue)))))
 
 ;;;###autoload
 (defun quelpa (arg &rest plist)
@@ -2092,29 +2323,48 @@ given package and remove any old versions of it even if the
 
 When `quelpa-async-p' is non-nil and this call is not already
 inside an async thread, the operation is delegated to
-`quelpa-async' automatically."
+`quelpa-async' automatically.
+
+When `quelpa-defer-p' is non-nil or `:defer t' is present in PLIST,
+the operation is queued in `quelpa--deferred-queue' instead of
+running immediately.  Call `quelpa-process-queue' to drain the queue."
   (interactive (list nil))
-  ;; Auto-dispatch to async when requested.
-  (if (and quelpa-async-p (not quelpa--in-async-context))
-      (apply #'quelpa-async arg plist)
-    (run-hooks 'quelpa-before-hook)
-    (when (quelpa-setup-p) ;if init fails we do nothing
-      (let* ((arg (or arg
-                      (let ((quelpa-melpa-recipe-stores
-                             `(,@quelpa-melpa-recipe-stores ,quelpa-cache)))
-                        (quelpa-interactive-candidate))))
-             (quelpa-upgrade-p (if current-prefix-arg t quelpa-upgrade-p)) ;shadow `quelpa-upgrade-p'
-             (quelpa-stable-p quelpa-stable-p) ;shadow `quelpa-stable-p'
-             (quelpa-autoremove-p (if current-prefix-arg t quelpa-autoremove-p))
-             (cache-item (quelpa-arg-rcp arg)))
-        (quelpa-parse-plist plist)
-        (quelpa-parse-stable cache-item)
-        (when-let* ((ver (apply #'quelpa-package-install arg plist)))
-          (when quelpa-autoremove-p
-            (quelpa--delete-obsoleted-package (car cache-item) ver))
-          (quelpa-update-cache cache-item))))
-    (quelpa-shutdown)
-    (run-hooks 'quelpa-after-hook)))
+  ;; Resolve recipe interactively before deferring so the selection UI
+  ;; is shown even when quelpa-defer-p is non-nil.
+  (when (and (null arg) (quelpa-setup-p))
+    (setq arg (let ((quelpa-melpa-recipe-stores
+                     `(,@quelpa-melpa-recipe-stores ,quelpa-cache)))
+                (quelpa-interactive-candidate))))
+  ;; Shadow all variables that quelpa-parse-plist mutates so that
+  ;; plist keywords never pollute the global state.
+  (let ((quelpa-defer-p quelpa-defer-p)
+        (quelpa-upgrade-p quelpa-upgrade-p)
+        (quelpa-stable-p quelpa-stable-p)
+        (quelpa-autoremove-p quelpa-autoremove-p))
+    (quelpa-parse-plist plist)
+    (if quelpa-defer-p
+        ;; Defer: push to queue and return nil.
+        ;; Skip if arg is nil (e.g. quelpa-setup-p failed above).
+        (when arg
+          (let ((clean-plist (quelpa--plist-remove plist :defer)))
+            (push (cons arg clean-plist) quelpa--deferred-queue)
+            nil))
+      ;; Auto-dispatch to async when requested.
+      (if (and quelpa-async-p (not quelpa--in-async-context))
+          (apply #'quelpa-async arg plist)
+        (run-hooks 'quelpa-before-hook)
+        (when (quelpa-setup-p) ;if init fails we do nothing
+          (let* ((quelpa-upgrade-p (if current-prefix-arg t quelpa-upgrade-p))
+                 (quelpa-stable-p quelpa-stable-p)
+                 (quelpa-autoremove-p (if current-prefix-arg t quelpa-autoremove-p))
+                 (cache-item (quelpa-arg-rcp arg)))
+          (quelpa-parse-stable cache-item)
+          (when-let* ((ver (apply #'quelpa-package-install arg plist)))
+            (when quelpa-autoremove-p
+              (quelpa--delete-obsoleted-package (car cache-item) ver))
+            (quelpa-update-cache cache-item))))
+      (quelpa-shutdown)
+      (run-hooks 'quelpa-after-hook)))))
 
 ;;;###autoload
 (defun quelpa-async (arg &rest plist)
