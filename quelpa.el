@@ -338,7 +338,7 @@ already and should not be upgraded etc)."
            (melpa-ver
             (let ((base-ver
                    (if-let* ((info (quelpa-build--pkg-info (symbol-name name)
-                                                          files build-dir)))
+                                                           files build-dir)))
                        (aref info 3)
                      '(0 0 0))))
               ;; limit the base version length to 4
@@ -1651,6 +1651,7 @@ Returns the archive entry for the package."
                    (quelpa-build--get-package-info :keep-version)))
     (_
      (let* ((default-directory source-dir)
+            (files (quelpa-build-expand-file-specs source-dir files))
             (pkg-file (concat package-name "-pkg.el"))
             (pkg-file-source (or (quelpa-build--find-source-file pkg-file files)
                                  pkg-file))
