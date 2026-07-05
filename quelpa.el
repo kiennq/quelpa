@@ -192,8 +192,8 @@ thread-local, callers who rebind variables such as
 
 (defcustom quelpa-version-type 'melpa
   "Version type, can be `melpa' or `elpa'.
-`melpa': e.g. 20260102.1223
-`elpa': e.g. 0.1.2.3.20260102.1223"
+`melpa': e.g. 20260102.17
+`elpa': e.g. 0.1.2.0.20260102.17"
   :group 'quelpa
   :type '(choice (const :tag "melpa" melpa)
                  (const :tag "elpa" elpa)))
@@ -270,8 +270,7 @@ OP is taking two version list and comparing."
                 (or (when-let* ((pkg-desc (cdr (assq name package-alist)))
                                 (pkg-ver (package-desc-version (car pkg-desc))))
                       (if (equal ver-type 'elpa)
-                          ;; two/three last segments of elpa version type is melpa one
-                          (last pkg-ver (if (>= (car (last pkg-ver)) 0) 2 3))
+                          (last pkg-ver 2)
                         pkg-ver))
                     (alist-get rcp package--builtin-versions)
                     quelpa--min-ver)))
@@ -288,6 +287,22 @@ OP is taking two version list and comparing."
 (defmacro quelpa-version=-p (rcp version)
   "Return non-nil if VERSION of pkg with RCP is same which what is currently installed."
   `(quelpa-version-cmp ,rcp ,version 'version-list-=))
+
+(defun quelpa-build--elpa-release-prefix (name files build-dir)
+  "Return ELPA release prefix for NAME using FILES in BUILD-DIR.
+The returned list includes the separator zero before the generated MELPA suffix."
+  (let* ((info (ignore-errors
+                 (quelpa-build--pkg-info (symbol-name name) files build-dir)))
+         (release (and (vectorp info)
+                       (< 3 (length info))
+                       (aref info 3))))
+    (append (if (and (consp release)
+                     (condition-case nil
+                         (cl-every #'integerp release)
+                       (error nil)))
+                release
+              '(0 0))
+            (list 0))))
 
 (defun quelpa--package-installed-p (package &optional min-version)
   "Return non-nil if PACKAGE, of MIN-VERSION or newer, is installed.
@@ -336,17 +351,9 @@ already and should not be upgraded etc)."
           (cond
            ((or (not (equal ver-type 'elpa)) quelpa-stable-p) melpa-ver)
            (melpa-ver
-            (let ((base-ver
-                   (if-let* ((info (quelpa-build--pkg-info (symbol-name name)
-                                                           files build-dir)))
-                       (aref info 3)
-                     '(0 0 0))))
-              ;; limit the base version length to 4
-              (if (< (length base-ver) 4)
-                  (nconc base-ver (make-list (- 4 (length base-ver)) 0))
-                (setf (nthcdr 4 base-ver) nil))
-              (package-version-join
-               (nconc base-ver (version-to-list melpa-ver))))))))
+            (package-version-join
+             (nconc (quelpa-build--elpa-release-prefix name files build-dir)
+                    (version-to-list melpa-ver)))))))
     (prog1
         (if version
             (quelpa-archive-file-name
@@ -364,20 +371,21 @@ already and should not be upgraded etc)."
 
 (defun quelpa-file-version (file-path type version time-stamp)
   "Return version of file at FILE-PATH."
-  (if (eq type 'directory)
-      time-stamp
-    (cl-letf* ((package-strip-rcs-id-orig (symbol-function 'package-strip-rcs-id))
-               ((symbol-function 'package-strip-rcs-id)
-                (lambda (str)
-                  (or (funcall package-strip-rcs-id-orig (lm-header "package-version"))
-                      (funcall package-strip-rcs-id-orig (lm-header "version"))
-                      "0"))))
-      (concat (if-let* ((desc (quelpa-get-package-desc file-path)))
-                  (mapconcat #'number-to-string (package-desc-version desc) ".")
-                "0")
-              (pcase version
-                (`original "")
-                (_ (concat "pre0." time-stamp)))))))
+  (let ((time-stamp (quelpa-build--melpa-version time-stamp 0)))
+    (if (eq type 'directory)
+        time-stamp
+      (cl-letf* ((package-strip-rcs-id-orig (symbol-function 'package-strip-rcs-id))
+                 ((symbol-function 'package-strip-rcs-id)
+                  (lambda (str)
+                    (or (funcall package-strip-rcs-id-orig (lm-header "package-version"))
+                        (funcall package-strip-rcs-id-orig (lm-header "version"))
+                        "0"))))
+        (concat (if-let* ((desc (quelpa-get-package-desc file-path)))
+                    (mapconcat #'number-to-string (package-desc-version desc) ".")
+                  "0")
+                (pcase version
+                  (`original "")
+                  (_ (concat "pre0." time-stamp))))))))
 
 (defun quelpa-directory-files (path)
   "Return list of directory files from PATH recursively."
@@ -586,6 +594,31 @@ or nil if the version cannot be parsed."
      "\\.0+" "."
      (format-time-string "%Y%m%d.%H%M%S" time))))
 
+(defun quelpa-build--parse-count (str &optional offset)
+  "Parse the first non-negative integer from STR plus OFFSET.
+Return 0 when STR does not contain a usable count."
+  (if (and (stringp str)
+           (string-match "\\([0-9]+\\)" str))
+      (max 0 (+ (string-to-number (match-string 1 str))
+                (or offset 0)))
+    0))
+
+(defun quelpa-build--melpa-version (time-version &optional count)
+  "Return generated MELPA version from TIME-VERSION and COUNT.
+TIME-VERSION may contain a time component; only the YYYYMMDD segment is kept."
+  (let ((date (car (split-string time-version "\\.")))
+        (count (if (and (integerp count) (>= count 0)) count 0)))
+    (format "%s.%d" date count)))
+
+(defun quelpa-build--run-process-count (dir command &rest args)
+  "Run COMMAND with ARGS in DIR and return its numeric count output.
+Return 0 when the command fails or the output cannot be parsed."
+  (condition-case nil
+      (with-temp-buffer
+        (apply #'quelpa-build--run-process dir command args)
+        (quelpa-build--parse-count (buffer-string)))
+    (error 0)))
+
 (defun quelpa-build--find-parse-time (regexp &optional bound)
   "Find REGEXP in current buffer and format as a time-based version string.
 An optional second argument BOUND bounds the search; it is a
@@ -785,10 +818,12 @@ A number as third arg means request confirmation if NEWNAME already exists."
      (setq headers (quelpa-build--url-copy-file download-url filename t)))
     (when (zerop (nth 7 (file-attributes filename)))
       (error "Wiki file %s was empty - has it been removed?" filename))
-    (quelpa-build--parse-time
-     (with-temp-buffer
-       (insert headers)
-       (mail-fetch-field "last-modified")))))
+    (quelpa-build--melpa-version
+     (quelpa-build--parse-time
+      (with-temp-buffer
+        (insert headers)
+        (mail-fetch-field "last-modified")))
+     0)))
 
 (defun quelpa-build--checkout-wiki (name config dir)
   "Checkout package NAME with config CONFIG from the EmacsWiki into DIR."
@@ -843,10 +878,12 @@ A number as third arg means request confirmation if NEWNAME already exists."
         (apply 'quelpa-build--run-process
                dir "darcs" "changes" "--max-count" "1"
                (quelpa-build--expand-source-file-list dir config))
-        (quelpa-build--find-parse-time "\
+        (quelpa-build--melpa-version
+         (quelpa-build--find-parse-time "\
 \\([a-zA-Z]\\{3\\} [a-zA-Z]\\{3\\} \
 \\( \\|[0-9]\\)[0-9] [0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\} \
-[A-Za-z]\\{3\\} [0-9]\\{4\\}\\)")))))
+[A-Za-z]\\{3\\} [0-9]\\{4\\}\\)")
+         (quelpa-build--run-process-count dir "darcs" "changes" "--count"))))))
 
 ;;;; Fossil
 
@@ -876,10 +913,13 @@ A number as third arg means request confirmation if NEWNAME already exists."
           (quelpa-build--run-process dir "fossil" "clone" repo "repo.fossil")
           (quelpa-build--run-process dir "fossil" "open" "repo.fossil")))
         (quelpa-build--run-process dir "fossil" "timeline" "-n" "1" "-t" "ci")
-        (or (quelpa-build--find-parse-time "\
+        (quelpa-build--melpa-version
+         (or (quelpa-build--find-parse-time "\
 === \\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} ===\n\
 [0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\) ")
-            (error "No valid timestamps found!"))))))
+             (error "No valid timestamps found!"))
+         (quelpa-build--run-process-count
+          dir "fossil" "sql" "select count(*) from event where type='ci'"))))))
 
 ;;;; Svn
 
@@ -908,11 +948,18 @@ A number as third arg means request confirmation if NEWNAME already exists."
           (quelpa-build--run-process nil "svn" "checkout" repo dir)))
         (apply 'quelpa-build--run-process dir "svn" "info"
                (quelpa-build--expand-source-file-list dir config))
-        (or (quelpa-build--find-parse-time-newest "\
+        (let ((time-version
+               (or (quelpa-build--find-parse-time-newest "\
 Last Changed Date: \\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} \
 [0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\( [+-][0-9]\\{4\\}\\)?\\)"
-                                                  bound)
-            (error "No valid timestamps found!"))))))
+                                                          bound)
+                   (error "No valid timestamps found!")))
+              (count (condition-case nil
+                         (quelpa-build--parse-count
+                          (quelpa-build--run-process-match "Revision: \\([0-9]+\\)"
+                                                           dir "svn" "info"))
+                       (error 0))))
+          (quelpa-build--melpa-version time-version count))))))
 
 ;;;; Cvs
 
@@ -984,8 +1031,14 @@ Return a cons cell whose `car' is the root and whose `cdr' is the repository."
                                    (quelpa-build--valid-version x))))))
         (when (string-match "^\\/[^\\/]*\\/[^\\/]*\\/\\([^\\/]*\\)\\/\\/$" latest)
           (setq latest (match-string 1 latest)))
-        (or (quelpa-build--parse-time latest)
-            (error "No valid timestamps found!"))))))
+        (let ((count (save-excursion
+                       (goto-char bound)
+                       (cl-loop while (re-search-forward "^revision [0-9.]+$" nil t)
+                                count t))))
+          (quelpa-build--melpa-version
+           (or (quelpa-build--parse-time latest)
+               (error "No valid timestamps found!"))
+           count))))))
 
 ;;;; Git
 
@@ -1069,9 +1122,19 @@ Return a cons cell whose `car' is the root and whose `cdr' is the repository."
         (apply 'quelpa-build--run-process
                dir "git" "--no-pager" "log" "--first-parent" "-n1" "--pretty=format:'\%ci'"
                (quelpa-build--expand-source-file-list dir config))
-        (quelpa-build--find-parse-time "\
+        (quelpa-build--melpa-version
+         (quelpa-build--find-parse-time "\
 \\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} \
-[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\( [+-][0-9]\\{4\\}\\)?\\)")))))
+[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\( [+-][0-9]\\{4\\}\\)?\\)")
+         (condition-case nil
+             (let ((shallow (quelpa-build--run-process-match
+                             "\\(.*\\)" dir "git" "rev-parse"
+                             "--is-shallow-repository")))
+               (if (equal shallow "false")
+                   (quelpa-build--run-process-count
+                    dir "git" "rev-list" "--count" "HEAD")
+                 0))
+           (error 0)))))))
 
 (defun quelpa-build--git-head-branch (dir)
   "Get the current git repo for DIR."
@@ -1171,9 +1234,11 @@ This will perform an checkout or a reset if FORCE."
             (package-version-join (car tag-version)))
         (apply 'quelpa-build--run-process dir "bzr" "log" "-l1"
                (quelpa-build--expand-source-file-list dir config))
-        (quelpa-build--find-parse-time "\
+        (quelpa-build--melpa-version
+         (quelpa-build--find-parse-time "\
 \\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} \
-[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\( [+-][0-9]\\{4\\}\\)?\\)")))))
+[0-9]\\{2\\}:[0-9]\\{2\\}:[0-9]\\{2\\}\\( [+-][0-9]\\{4\\}\\)?\\)")
+         (quelpa-build--run-process-count dir "bzr" "revno"))))))
 
 ;;;; Hg
 
@@ -1230,9 +1295,13 @@ This will perform an checkout or a reset if FORCE."
         (apply 'quelpa-build--run-process
                dir "hg" "log" "--style" "compact" "-l1"
                (quelpa-build--expand-source-file-list dir config))
-        (quelpa-build--find-parse-time "\
+        (quelpa-build--melpa-version
+         (quelpa-build--find-parse-time "\
 \\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} \
-[0-9]\\{2\\}:[0-9]\\{2\\}\\( [+-][0-9]\\{4\\}\\)?\\)")))))
+[0-9]\\{2\\}:[0-9]\\{2\\}\\( [+-][0-9]\\{4\\}\\)?\\)")
+         (quelpa-build--run-process-count
+          dir "hg" "log" "-r" "."
+          "--template" "{revset('ancestors(.)')|count}\n"))))))
 
 (defun quelpa-build--checkout-bitbucket (name config dir)
   "Check package NAME with config CONFIG out of bitbucket into DIR."

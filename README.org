@@ -9,7 +9,8 @@
 Build and install your Emacs Lisp packages on-the-fly and directly from source.
 
 * News
-- 2022/09/26: Support elpa-devel version scheme (e.x, =0.27.0.20220914.164819=) with =:version-type elpa= in recipes
+- 2026/07/04: Generate non-stable versions as =YYYYMMDD.COUNT= for MELPA-style versions and =RELEASE.0.YYYYMMDD.COUNT= for ELPA-style versions.
+- 2022/09/26: Support elpa-devel version scheme with =:version-type elpa= in recipes
 - 2021/03/12: Switch default from shallow clone to partial clone for git recipes
 
 * Contents
@@ -161,7 +162,7 @@ To do so for a single package:
 
 Using the argument to the =quelpa= command overrides the global setting =quelpa-stable-p=, and using the argument in a recipe overrides both the command argument and the global setting.
 
-*Note:* Non-tagged package version numbers are generated at build time using the current date, and these numbers usually are sorted as higher than tagged version numbers.  Therefore, if you have installed a non-tagged package version and wish to replace it with a tagged version, you must first remove the package, then install the tagged version.
+*Note:* Non-tagged package version numbers are generated from the checkout date and a repository history count.  These numbers usually are sorted as higher than tagged version numbers.  Therefore, if you have installed a non-tagged package version and wish to replace it with a tagged version, you must first remove the package, then install the tagged version.
 
 *Note:* Tagged versions are commonly referred to as "stable" versions (since these are the versions appearing in the MELPA Stable repo).  However, such package versions are not necessarily more stable than the untagged versions provided in the non-"Stable" MELPA repo, and using them is not generally recommended.  Therefore, we do not refer to such versions as "stable" versions.
 
